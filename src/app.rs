@@ -839,6 +839,12 @@ impl App {
         let tiers = self.ov.tier_list();
         let popup = self.ov.ui.slot_hover.and_then(|slot| self.ov.popup(slot).map(|p| (slot, p)));
         let preview = tiers.as_ref().and_then(|t| self.ov.preview(t));
+        if let Some(list) = &tiers {
+            // Hover previews then only need a decode, not a download.
+            for row in list.sections.iter().flat_map(|sec| &sec.rows) {
+                self.ov.images.prefetch(ImageKind::Render, &row.card_id);
+            }
+        }
 
         let opaque = !self.x.compositing;
         let mut ctx = Ctx { fonts: &mut self.ov.fonts, images: &mut self.ov.images, s, opaque };

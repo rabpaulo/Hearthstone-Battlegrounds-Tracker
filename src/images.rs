@@ -4,10 +4,10 @@
 //! - tiles: 256×59 strips used for list rows,
 //! - renders: full Battlegrounds card images used for the hover preview.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
 
 use tiny_skia::Pixmap;
 
@@ -37,32 +37,80 @@ impl ImageKind {
 
 type Key = (ImageKind, String);
 
+enum Job {
+    /// Download if needed, decode and hand back to the UI thread.
+    Load(Key),
+    /// Only make sure the file is in the disk cache.
+    Fetch(Key),
+}
+
+/// Work shared by the worker threads. Loads go to the front so whatever the
+/// UI is waiting on overtakes background prefetches.
+#[derive(Default)]
+struct Queue {
+    jobs: Mutex<VecDeque<Job>>,
+    ready: Condvar,
+}
+
+impl Queue {
+    fn push(&self, job: Job) {
+        let mut jobs = self.jobs.lock().unwrap();
+        match job {
+            Job::Load(_) => jobs.push_front(job),
+            Job::Fetch(_) => jobs.push_back(job),
+        }
+        self.ready.notify_one();
+    }
+
+    fn pop(&self) -> Job {
+        let mut jobs = self.jobs.lock().unwrap();
+        loop {
+            if let Some(job) = jobs.pop_front() {
+                return job;
+            }
+            jobs = self.ready.wait(jobs).unwrap();
+        }
+    }
+}
+
 pub struct Images {
     loaded: HashMap<Key, Arc<Pixmap>>,
     requested: HashSet<Key>,
-    to_worker: Sender<Key>,
+    prefetched: HashSet<Key>,
+    queue: Arc<Queue>,
     from_worker: Receiver<(Key, Option<Pixmap>)>,
     revision: u64,
 }
 
 impl Images {
     pub fn new() -> Images {
-        let (to_worker, jobs) = channel::<Key>();
-        let (done, from_worker) = channel();
-        let jobs = Arc::new(std::sync::Mutex::new(jobs));
-        for _ in 0..3 {
-            let jobs = jobs.clone();
+        let queue = Arc::new(Queue::default());
+        let (done, from_worker): (Sender<_>, _) = channel();
+        for _ in 0..4 {
+            let queue = queue.clone();
             let done = done.clone();
             std::thread::spawn(move || loop {
-                let job = jobs.lock().unwrap().recv();
-                let Ok(key) = job else { return };
-                let img = load(&key);
-                if done.send((key, img)).is_err() {
-                    return;
+                match queue.pop() {
+                    Job::Load(key) => {
+                        let img = load(&key);
+                        if done.send((key, img)).is_err() {
+                            return;
+                        }
+                    }
+                    Job::Fetch(key) => {
+                        fetch(&key);
+                    }
                 }
             });
         }
-        Images { loaded: HashMap::new(), requested: HashSet::new(), to_worker, from_worker, revision: 0 }
+        Images {
+            loaded: HashMap::new(),
+            requested: HashSet::new(),
+            prefetched: HashSet::new(),
+            queue,
+            from_worker,
+            revision: 0,
+        }
     }
 
     /// The image if ready; otherwise schedules it and returns `None`.
@@ -75,9 +123,23 @@ impl Images {
             return Some(img.clone());
         }
         if self.requested.insert(key.clone()) {
-            let _ = self.to_worker.send(key);
+            self.queue.push(Job::Load(key));
         }
         None
+    }
+
+    /// Downloads an image into the disk cache in the background, so a later
+    /// `get` only has to decode it.
+    pub fn prefetch(&mut self, kind: ImageKind, card_id: &str) {
+        if card_id.is_empty() {
+            return;
+        }
+        let key = (kind, card_id.to_string());
+        if self.requested.contains(&key) || self.prefetched.contains(&key) {
+            return;
+        }
+        self.prefetched.insert(key.clone());
+        self.queue.push(Job::Fetch(key));
     }
 
     /// Collects finished downloads. Returns true when something new arrived.
@@ -105,7 +167,8 @@ fn cache_path(key: &Key) -> PathBuf {
     paths::cache_dir().join(key.0.dir()).join(format!("{}.png", key.1))
 }
 
-fn load(key: &Key) -> Option<Pixmap> {
+/// Path of the cached file, downloading it first if needed.
+fn fetch(key: &Key) -> Option<PathBuf> {
     let path = cache_path(key);
     if !path.is_file() {
         if let Err(e) = net::download(&key.0.url(&key.1), &path) {
@@ -113,6 +176,11 @@ fn load(key: &Key) -> Option<Pixmap> {
             return None;
         }
     }
+    Some(path)
+}
+
+fn load(key: &Key) -> Option<Pixmap> {
+    let path = fetch(key)?;
     let img = decode_png(&std::fs::read(&path).ok()?)?;
     match key.0 {
         // Tiles reserve their left part for a deck tracker's mana gem.
