@@ -1,0 +1,40 @@
+# Copy to ~/.config/hsbg-overlay/config.toml. Every key is optional.
+
+# Hearthstone install folder (the one with Logs/). Detected automatically from
+# the running game or the usual Wine/Lutris/Steam/Bottles prefixes.
+# hearthstone_dir = "/home/me/Games/battlenet/drive_c/Program Files (x86)/Hearthstone"
+
+# Extra UI scale (panels already scale with the game window height).
+scale = 1.0
+
+# Combat simulations per fight (more = steadier odds, slower).
+simulations = 8000
+
+# Node.js used by the simulator, and where sim.mjs + node_modules live.
+node = "node"
+# sidecar_dir = "/home/me/.local/share/hsbg-overlay/sidecar"
+
+# Hide the overlay while another window has focus.
+hide_when_unfocused = true
+
+show_simulation = true
+show_tiers = true
+show_session = true
+show_opponent_boards = true
+
+# Tier list starts showing only the lobby's tribes ("Lobby only" toggle).
+hide_unavailable_tribes = true
+
+# Read the lobby's tribes from the game's memory so they are known from the
+# hero pick on (read-only, like HDT/Firestone). Set to false to infer them
+# from the minions Bob offers instead.
+read_game_memory = true
+
+# Leaderboard hover areas, as fractions of the game window height.
+# Run `hsbg-overlay --calibrate` to see them and adjust.
+[leaderboard]
+center_x = -0.697   # portrait column centre, relative to the window centre
+top = 0.178         # top of the first portrait
+spacing = 0.098     # distance between portraits
+width = 0.09
+height = 0.088
