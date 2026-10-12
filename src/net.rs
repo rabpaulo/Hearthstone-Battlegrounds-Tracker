@@ -1,15 +1,22 @@
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(60))
-        .user_agent(concat!("hsbg-overlay/", env!("CARGO_PKG_VERSION")))
-        .build()
+/// Shared so connections (and their TLS sessions) are kept alive between
+/// requests to the same host.
+fn agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout_read(Duration::from_secs(60))
+            .user_agent(concat!("hsbg-overlay/", env!("CARGO_PKG_VERSION")))
+            .build()
+    })
 }
 
 pub fn get_bytes(url: &str) -> Result<Vec<u8>> {
@@ -29,7 +36,9 @@ pub fn download(url: &str, dest: &Path) -> Result<()> {
     if let Some(dir) = dest.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = dest.with_extension("part");
+    // Unique per call: two threads may fetch the same file at once.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let tmp = dest.with_extension(format!("{}.{}.part", std::process::id(), SEQ.fetch_add(1, Ordering::Relaxed)));
     std::fs::write(&tmp, &body)?;
     std::fs::rename(&tmp, dest)?;
     Ok(())
