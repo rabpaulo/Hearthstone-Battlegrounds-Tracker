@@ -1,0 +1,11 @@
+{
+  "name": "hsbg-overlay-sim",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Battlegrounds combat simulator process for hsbg-overlay (JSON lines over stdio)",
+  "license": "MIT",
+  "dependencies": {
+    "@firestone-hs/simulate-bgs-battle": "1.1.771"
+  }
+}
