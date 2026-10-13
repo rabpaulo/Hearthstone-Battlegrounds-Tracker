@@ -127,6 +127,10 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
   0,7 s.
 - `src/comps.rs`: tier list e guias de comps de
   `hsreplay.net/api/v1/battlegrounds/comp_guides/` (público, sem login).
+- `src/images.rs` + `src/net.rs`: imagens das cartas, baixadas e decodificadas
+  em 4 threads de fundo, com cache em disco (`tiles/` e `renders/` em
+  `~/.cache/hsbg-overlay`). As renders das cartas da tier list são pré-baixadas
+  ao abrir o painel, então o hover já encontra o arquivo pronto.
 - `src/x11.rs` + `src/ui`: janelas ARGB override-redirect desenhadas com
   tiny-skia/fontdue; posições relativas à janela do jogo, que é rastreada a
   cada 250 ms.
