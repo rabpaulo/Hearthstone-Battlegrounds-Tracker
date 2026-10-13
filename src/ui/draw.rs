@@ -124,6 +124,7 @@ impl Fonts {
 pub enum Align {
     Left,
     Center,
+    Right,
 }
 
 pub struct Canvas {
@@ -255,6 +256,7 @@ impl Canvas {
         let mut pen = match align {
             Align::Left => x,
             Align::Center => x - width / 2.0,
+            Align::Right => x - width,
         };
         let baseline = y + fonts.ascent(px, weight);
         let mut prev = None;
