@@ -1,5 +1,6 @@
 mod app;
 mod cards;
+mod comps;
 mod config;
 mod game;
 mod history;

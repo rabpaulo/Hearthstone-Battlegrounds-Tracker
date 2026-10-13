@@ -21,6 +21,8 @@ show_simulation = true
 show_tiers = true
 show_session = true
 show_opponent_boards = true
+# "Comps" button: HSReplay's meta comp tier list and guides.
+show_comps = true
 
 # Tier list starts showing only the lobby's tribes ("Lobby only" toggle).
 hide_unavailable_tribes = true

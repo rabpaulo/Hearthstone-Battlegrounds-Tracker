@@ -24,6 +24,8 @@ pub struct Config {
     pub show_tiers: bool,
     pub show_session: bool,
     pub show_opponent_boards: bool,
+    /// "Comps" button: HSReplay's meta tier list and comp guides.
+    pub show_comps: bool,
     /// Tier list starts with only the lobby's tribes (toggle in its header).
     pub hide_unavailable_tribes: bool,
     /// Read the lobby tribes from the game's memory (known from the hero
@@ -66,6 +68,7 @@ impl Default for Config {
             show_tiers: true,
             show_session: true,
             show_opponent_boards: true,
+            show_comps: true,
             hide_unavailable_tribes: true,
             read_game_memory: true,
             leaderboard: LeaderboardGeometry::default(),

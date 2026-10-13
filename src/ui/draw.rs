@@ -96,6 +96,28 @@ impl Fonts {
         }
         String::new()
     }
+
+    /// Breaks `text` into lines no wider than `max` pixels, keeping its own
+    /// line breaks. A word too long for a line is shortened with an ellipsis.
+    pub fn wrap(&self, text: &str, px: f32, w: Weight, max: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        for para in text.lines().map(str::trim).filter(|p| !p.is_empty()) {
+            let mut line = String::new();
+            for word in para.split_whitespace() {
+                let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+                if line.is_empty() || self.measure(&candidate, px, w) <= max {
+                    line = candidate;
+                } else {
+                    lines.push(self.fit(&line, px, w, max));
+                    line = word.to_string();
+                }
+            }
+            if !line.is_empty() {
+                lines.push(self.fit(&line, px, w, max));
+            }
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
