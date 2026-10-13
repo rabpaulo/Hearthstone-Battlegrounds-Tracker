@@ -10,7 +10,8 @@ use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::shape::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{
     AtomEnum, ClipOrdering, ColormapAlloc, ConfigureWindowAux, ConnectionExt as _, CreateGCAux, CreateWindowAux,
-    EventMask, ImageFormat, MapState, PropMode, StackMode, VisualClass, Window, WindowClass,
+    EventMask, GrabMode, GrabStatus, ImageFormat, KeyButMask, MapState, PropMode, StackMode, VisualClass, Window,
+    WindowClass,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -48,6 +49,90 @@ struct Atoms {
     utf8_string: u32,
 }
 
+/// A key press, as far as a text field cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    Char(char),
+    Backspace,
+    /// Ctrl+Backspace / Ctrl+W.
+    DeleteWord,
+    /// Ctrl+U.
+    Clear,
+    Enter,
+    Escape,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Tab,
+    BackTab,
+}
+
+/// Translates a keysym; `None` for keys a text field ignores.
+fn key_from_keysym(sym: u32, ctrl: bool) -> Option<Key> {
+    Some(match sym {
+        0xff08 if ctrl => Key::DeleteWord,
+        0xff08 => Key::Backspace,
+        0xff0d | 0xff8d => Key::Enter,
+        0xff1b => Key::Escape,
+        0xff52 => Key::Up,
+        0xff54 => Key::Down,
+        0xff55 => Key::PageUp,
+        0xff56 => Key::PageDown,
+        0xff09 => Key::Tab,
+        0xfe20 => Key::BackTab,
+        0x77 | 0x57 if ctrl => Key::DeleteWord,
+        0x75 | 0x55 if ctrl => Key::Clear,
+        _ if ctrl => return None,
+        // Latin-1 keysyms are their code points; others are offset.
+        0x20..=0x7e | 0xa0..=0xff => Key::Char(char::from_u32(sym)?),
+        0x0100_00a0..=0x0110_ffff => Key::Char(char::from_u32(sym - 0x0100_0000)?),
+        _ => return None,
+    })
+}
+
+/// Lower- and upper-case forms of a Latin-1 letter keysym.
+fn keysym_cases(sym: u32) -> (u32, u32) {
+    match char::from_u32(sym) {
+        Some(c) if sym <= 0xff && c.is_alphabetic() => {
+            let lower = c.to_lowercase().next().unwrap_or(c) as u32;
+            let upper = c.to_uppercase().next().filter(|u| (*u as u32) <= 0xff).unwrap_or(c) as u32;
+            (lower, upper)
+        }
+        _ => (sym, sym),
+    }
+}
+
+/// Core keyboard mapping: keysyms per keycode, as the server reports them.
+#[derive(Default)]
+struct Keymap {
+    min_keycode: u8,
+    per_keycode: usize,
+    syms: Vec<u32>,
+}
+
+impl Keymap {
+    /// Keysym for a key with the given modifiers (shift, caps lock and
+    /// AltGr, which is Mod5 on common layouts).
+    fn keysym(&self, keycode: u8, state: u16) -> u32 {
+        let Some(start) = (keycode.checked_sub(self.min_keycode)).map(|k| k as usize * self.per_keycode) else {
+            return 0;
+        };
+        let Some(syms) = self.syms.get(start..start + self.per_keycode) else { return 0 };
+        let at = |i: usize| syms.get(i).copied().unwrap_or(0);
+        let altgr = state & u16::from(KeyButMask::MOD5) != 0 && at(4) != 0;
+        let (mut base, mut shifted) = if altgr { (at(4), at(5)) } else { (at(0), at(1)) };
+        if shifted == 0 {
+            (base, shifted) = keysym_cases(base);
+        }
+        let mut shift = state & u16::from(KeyButMask::SHIFT) != 0;
+        if state & u16::from(KeyButMask::LOCK) != 0 && keysym_cases(base).0 != keysym_cases(base).1 {
+            shift = !shift;
+        }
+        if shift { shifted } else { base }
+    }
+}
+
 pub struct X11 {
     pub conn: RustConnection,
     root: Window,
@@ -58,6 +143,7 @@ pub struct X11 {
     pub compositing: bool,
     atoms: Atoms,
     max_request_bytes: usize,
+    keymap: Keymap,
 }
 
 /// What we know about the game window.
@@ -109,7 +195,7 @@ impl X11 {
             anyhow::bail!("the X server lacks the SHAPE extension (needed for click-through panels)");
         }
         let max_request_bytes = conn.maximum_request_bytes();
-        Ok(X11 {
+        let mut x = X11 {
             screen_rect: Rect::new(0, 0, screen.width_in_pixels as i32, screen.height_in_pixels as i32),
             root: screen.root,
             depth,
@@ -118,8 +204,45 @@ impl X11 {
             compositing: compositing && depth == 32,
             atoms,
             max_request_bytes,
+            keymap: Keymap::default(),
             conn,
-        })
+        };
+        x.reload_keymap();
+        Ok(x)
+    }
+
+    /// Reads the keyboard mapping; call again on `MappingNotify`.
+    pub fn reload_keymap(&mut self) {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let reply = self.conn.get_keyboard_mapping(min, max - min + 1).ok().and_then(|c| c.reply().ok());
+        match reply {
+            Some(r) => {
+                self.keymap = Keymap { min_keycode: min, per_keycode: r.keysyms_per_keycode as usize, syms: r.keysyms };
+            }
+            None => log::warn!("could not read the keyboard mapping"),
+        }
+    }
+
+    pub fn key(&self, keycode: u8, state: KeyButMask) -> Option<Key> {
+        let state = u16::from(state);
+        let sym = self.keymap.keysym(keycode, state);
+        key_from_keysym(sym, state & u16::from(KeyButMask::CONTROL) != 0)
+    }
+
+    /// Sends all key presses to `win` (overlay windows never get the input
+    /// focus). False when another client holds the keyboard.
+    pub fn grab_keyboard(&self, win: Window) -> bool {
+        let reply = self
+            .conn
+            .grab_keyboard(false, win, x11rb::CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC)
+            .ok()
+            .and_then(|c| c.reply().ok());
+        reply.is_some_and(|r| r.status == GrabStatus::SUCCESS)
+    }
+
+    pub fn ungrab_keyboard(&self) {
+        let _ = self.conn.ungrab_keyboard(x11rb::CURRENT_TIME);
     }
 
     pub fn flush(&self) {
@@ -212,16 +335,18 @@ impl X11 {
         active
     }
 
-    pub fn pointer(&self) -> Option<(i32, i32)> {
+    /// Pointer position, and whether a mouse button is held.
+    pub fn pointer(&self) -> Option<(i32, i32, bool)> {
         let p = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
-        Some((p.root_x as i32, p.root_y as i32))
+        let buttons = KeyButMask::BUTTON1 | KeyButMask::BUTTON2 | KeyButMask::BUTTON3;
+        Some((p.root_x as i32, p.root_y as i32, u16::from(p.mask) & u16::from(buttons) != 0))
     }
 
     pub fn create_overlay(&self, name: &str, interactive: bool) -> Result<OverlayWindow> {
         let win = self.conn.generate_id()?;
         let mut events = EventMask::EXPOSURE;
         if interactive {
-            events |= EventMask::BUTTON_PRESS | EventMask::POINTER_MOTION | EventMask::LEAVE_WINDOW;
+            events |= EventMask::BUTTON_PRESS | EventMask::POINTER_MOTION | EventMask::LEAVE_WINDOW | EventMask::KEY_PRESS;
         }
         let aux = CreateWindowAux::new()
             .background_pixel(0)
@@ -356,5 +481,39 @@ impl OverlayWindow {
                 chunk,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keysyms_follow_shift_caps_lock_and_altgr() {
+        // Keycode 10: a/A; 11: 1/!, AltGr ¹; 12: Return.
+        let km = Keymap {
+            min_keycode: 10,
+            per_keycode: 6,
+            syms: vec![0x61, 0, 0, 0, 0, 0, 0x31, 0x21, 0, 0, 0xb9, 0, 0xff0d, 0, 0, 0, 0, 0],
+        };
+        let (shift, lock, altgr) = (u16::from(KeyButMask::SHIFT), u16::from(KeyButMask::LOCK), u16::from(KeyButMask::MOD5));
+        assert_eq!(km.keysym(10, 0), 0x61);
+        assert_eq!(km.keysym(10, shift), 0x41);
+        assert_eq!(km.keysym(10, lock), 0x41);
+        assert_eq!(km.keysym(11, lock), 0x31, "caps lock leaves digits alone");
+        assert_eq!(km.keysym(11, shift), 0x21);
+        assert_eq!(km.keysym(11, altgr), 0xb9);
+        assert_eq!(km.keysym(9, 0), 0, "below the first keycode");
+        assert_eq!(key_from_keysym(km.keysym(12, 0), false), Some(Key::Enter));
+    }
+
+    #[test]
+    fn control_keys_edit_and_others_are_ignored() {
+        assert_eq!(key_from_keysym(0x61, false), Some(Key::Char('a')));
+        assert_eq!(key_from_keysym(0xe9, false), Some(Key::Char('é')));
+        assert_eq!(key_from_keysym(0x75, true), Some(Key::Clear));
+        assert_eq!(key_from_keysym(0xff08, true), Some(Key::DeleteWord));
+        assert_eq!(key_from_keysym(0x61, true), None);
+        assert_eq!(key_from_keysym(0xffe1, false), None, "Shift alone");
     }
 }

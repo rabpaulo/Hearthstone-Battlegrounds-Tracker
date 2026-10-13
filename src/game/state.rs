@@ -487,10 +487,10 @@ impl Game {
         self.local_player().map(|(_, e)| self.entities[&e].tag(tags::PLAYER_TECH_LEVEL)).unwrap_or(0)
     }
 
-    /// Highest tavern tier this game allows (7 with some anomalies).
+    /// Highest tavern tier the tier bar offers. Tier 7 is always listed so
+    /// its cards can be browsed whether or not this game unlocks it.
     pub fn max_tavern_tier(&self) -> i32 {
-        let t = self.local_player().map(|(_, e)| self.entities[&e].tag(tags::BACON_MAX_PLAYER_TECH_LEVEL)).unwrap_or(0);
-        if t > 0 { t.min(7) } else { 6 }
+        7
     }
 
     /// Card ids of minions Bob has offered us this game.

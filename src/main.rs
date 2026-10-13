@@ -9,6 +9,7 @@ mod logfile;
 mod memory;
 mod net;
 mod paths;
+mod search;
 mod sim;
 mod ui;
 mod x11;

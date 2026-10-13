@@ -20,10 +20,15 @@ pub enum ImageKind {
 }
 
 impl ImageKind {
-    fn url(self, card_id: &str) -> String {
+    /// Where to download from, in order. Heroes have no Battlegrounds
+    /// render, only the regular one.
+    fn urls(self, card_id: &str) -> Vec<String> {
         match self {
-            ImageKind::Tile => format!("https://art.hearthstonejson.com/v1/tiles/{card_id}.png"),
-            ImageKind::Render => format!("https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{card_id}.png"),
+            ImageKind::Tile => vec![format!("https://art.hearthstonejson.com/v1/tiles/{card_id}.png")],
+            ImageKind::Render => vec![
+                format!("https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{card_id}.png"),
+                format!("https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{card_id}.png"),
+            ],
         }
     }
 
@@ -170,13 +175,16 @@ fn cache_path(key: &Key) -> PathBuf {
 /// Path of the cached file, downloading it first if needed.
 fn fetch(key: &Key) -> Option<PathBuf> {
     let path = cache_path(key);
-    if !path.is_file() {
-        if let Err(e) = net::download(&key.0.url(&key.1), &path) {
-            log::debug!("image {}: {e:#}", key.1);
-            return None;
+    if path.is_file() {
+        return Some(path);
+    }
+    for url in key.0.urls(&key.1) {
+        match net::download(&url, &path) {
+            Ok(()) => return Some(path),
+            Err(e) => log::debug!("image {}: {e:#}", key.1),
         }
     }
-    Some(path)
+    None
 }
 
 fn load(key: &Key) -> Option<Pixmap> {
