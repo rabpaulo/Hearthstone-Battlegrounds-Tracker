@@ -17,7 +17,7 @@ use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts};
 use crate::ui::panels::{
-    self, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
+    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
     OpponentPopup, SimPanel, TierHit, TierList, TierRow, TierSection, TopBar, TopHit,
 };
 use crate::x11::{GameWindow, OverlayWindow, Rect, X11};
@@ -142,6 +142,11 @@ impl Layout {
     pub fn info(&self, size: (i32, i32)) -> Rect {
         let y = (self.game_y + self.game_h * (self.lb.top - 0.01)) as i32;
         Rect::new(self.hs.x + self.px(6.0), y, size.0, size.1)
+    }
+
+    /// Tallest the opponent popup may be.
+    pub fn popup_max_h(&self) -> i32 {
+        self.hs.h - 2 * self.px(8.0)
     }
 
     pub fn popup(&self, slot: usize, size: (i32, i32)) -> Rect {
@@ -580,10 +585,16 @@ impl Overlay {
         if entry.is_local {
             return None;
         }
-        let seen = self.game.seen_board(entry.lobby_id);
-        let minions = seen
-            .map(|b| {
-                b.side
+        let boards = self
+            .game
+            .seen_boards(entry.lobby_id)
+            .iter()
+            .rev()
+            .map(|b| BoardView {
+                turn: b.turn,
+                tier: b.side.tavern_tier(),
+                minions: b
+                    .side
                     .board
                     .iter()
                     .map(|m| MinionView {
@@ -594,18 +605,17 @@ impl Overlay {
                         golden: m.tag(tags::PREMIUM) == 1 || m.card_id.ends_with("_G"),
                         keywords: keywords(m),
                     })
-                    .collect()
+                    .collect(),
             })
-            .unwrap_or_default();
+            .collect();
         Some(OpponentPopup {
             hero: self.db.name(&entry.hero_card_id).to_string(),
             hero_card_id: entry.hero_card_id.clone(),
             place: entry.place,
             health: entry.health + entry.armor,
-            tier: seen.map(|b| b.side.tavern_tier()).unwrap_or(0),
-            seen_turn: seen.map(|b| b.turn),
             turn: self.game.turn(),
-            minions,
+            boards,
+            hidden: 0,
             images_rev: self.images.revision(),
         })
     }
@@ -1135,7 +1145,8 @@ impl App {
             _ => p.preview.hide(x),
         }
         match popup {
-            Some((slot, pm)) if in_game && cfg.show_opponent_boards => {
+            Some((slot, mut pm)) if in_game && cfg.show_opponent_boards => {
+                pm.fit(s, layout.popup_max_h());
                 let rect = layout.popup(slot, pm.size(s));
                 p.popup.update(x, rect, &pm, &mut ctx, |m, c, ctx| m.render(c, ctx));
             }
@@ -1206,7 +1217,13 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     };
     ov.ui.selected_tier = Some(ov.game.tavern_tier().max(1));
     ov.ui.list_hover = Some(TierHit::Row(1));
-    let opponent = ov.game.leaderboard().into_iter().find(|p| !p.is_local && ov.game.seen_board(p.lobby_id).is_some());
+    // The opponent faced most often, to show the stacked boards.
+    let opponent = ov
+        .game
+        .leaderboard()
+        .into_iter()
+        .filter(|p| !p.is_local && ov.game.seen_board(p.lobby_id).is_some())
+        .max_by_key(|p| ov.game.seen_boards(p.lobby_id).len());
     ov.ui.slot_hover = opponent.map(|p| (p.place - 1) as usize);
 
     let hs = Rect::new(0, 0, 1920, 1080);
@@ -1229,7 +1246,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         }
         if let Some(p) = &popup {
             ids.push((ImageKind::Tile, p.hero_card_id.clone()));
-            ids.extend(p.minions.iter().map(|m| (ImageKind::Tile, m.card_id.clone())));
+            ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Tile, m.card_id.clone())));
         }
         for (kind, id) in &ids {
             if ov.images.get(*kind, id).is_none() {
@@ -1325,7 +1342,8 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
             }
         }
     }
-    if let (Some(p), Some(slot)) = (&popup, ov.ui.slot_hover) {
+    if let (Some(mut p), Some(slot)) = (popup, ov.ui.slot_hover) {
+        p.fit(s, layout.popup_max_h());
         emit(sc, &mut ctx, out, "popup", layout.popup(slot, p.size(s)), &|c, ctx| p.render(c, ctx))?;
     }
     screen.pixmap.save_png(out.join("screen.png"))?;

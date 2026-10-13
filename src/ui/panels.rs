@@ -1020,28 +1020,61 @@ pub struct MinionView {
     pub keywords: Vec<&'static str>,
 }
 
+/// One combat's worth of an opponent's board.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardView {
+    pub turn: i32,
+    pub tier: i32,
+    pub minions: Vec<MinionView>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpponentPopup {
     pub hero: String,
     pub hero_card_id: String,
     pub place: i32,
     pub health: i32,
-    pub tier: i32,
-    pub seen_turn: Option<i32>,
     pub turn: i32,
-    pub minions: Vec<MinionView>,
+    /// Newest first.
+    pub boards: Vec<BoardView>,
+    /// Older boards left out because they did not fit.
+    pub hidden: usize,
     pub images_rev: u64,
 }
 
 impl OpponentPopup {
     const W: f32 = 300.0;
     const HEAD: f32 = 52.0;
+    const BOARD_HEAD: f32 = 22.0;
     const ROW: f32 = 32.0;
+    const MORE: f32 = 20.0;
     const PAD: f32 = 6.0;
 
+    fn board_h(b: &BoardView) -> f32 {
+        Self::BOARD_HEAD + b.minions.len().max(1) as f32 * Self::ROW
+    }
+
+    fn content_h(&self) -> f32 {
+        let boards = if self.boards.is_empty() {
+            Self::ROW
+        } else {
+            self.boards.iter().map(Self::board_h).sum::<f32>()
+        };
+        let more = if self.hidden > 0 { Self::MORE } else { 0.0 };
+        Self::HEAD + boards + more + Self::PAD
+    }
+
+    /// Drops the oldest boards until the popup fits in `max_h` pixels,
+    /// always keeping the newest one.
+    pub fn fit(&mut self, s: f32, max_h: i32) {
+        while self.boards.len() > 1 && s_ceil(self.content_h(), s) > max_h {
+            self.boards.pop();
+            self.hidden += 1;
+        }
+    }
+
     pub fn size(&self, s: f32) -> (i32, i32) {
-        let rows = self.minions.len().max(1) as f32;
-        (s_ceil(Self::W, s), s_ceil(Self::HEAD + rows * Self::ROW + Self::PAD, s))
+        (s_ceil(Self::W, s), s_ceil(self.content_h(), s))
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1055,24 +1088,53 @@ impl OpponentPopup {
         ctx.tile_row(c, &self.hero_card_id, x, x, iw, hh, HEADER);
         let name = ctx.fonts.fit(&self.hero, 14.0 * s, Weight::Bold, iw - 20.0 * s);
         ctx.label_shadow(c, &name, x + 10.0 * s, x + 15.0 * s, 14.0, Weight::Bold, TEXT);
-        let seen = match self.seen_turn {
-            Some(t) if t == self.turn => format!("Tier {} · board from this turn", self.tier),
-            Some(t) => {
-                let ago = self.turn - t;
-                format!("Tier {} · board from turn {t} ({ago} turn{} ago)", self.tier, if ago == 1 { "" } else { "s" })
-            }
+        let faced = self.boards.len() + self.hidden;
+        let sub = match self.boards.first() {
+            Some(b) => format!("Tier {} · faced {faced} time{}", b.tier, if faced == 1 { "" } else { "s" }),
             None => "Not faced yet".to_string(),
         };
-        let seen = ctx.fonts.fit(&seen, 11.0 * s, Weight::Medium, iw - 20.0 * s);
-        ctx.label_shadow(c, &seen, x + 10.0 * s, x + 34.0 * s, 11.0, Weight::Medium, DIM);
+        let sub = ctx.fonts.fit(&sub, 11.0 * s, Weight::Medium, iw - 20.0 * s);
+        ctx.label_shadow(c, &sub, x + 10.0 * s, x + 34.0 * s, 11.0, Weight::Medium, DIM);
         let mut y = Self::HEAD * s;
-        if self.minions.is_empty() {
-            let msg = if self.seen_turn.is_some() { "Empty board" } else { "No board seen yet" };
-            ctx.label(c, msg, w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
+        if self.boards.is_empty() {
+            ctx.label(c, "No board seen yet", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
             return;
         }
+        for (i, b) in self.boards.iter().enumerate() {
+            y = self.render_board(c, ctx, b, i == 0, y);
+        }
+        if self.hidden > 0 {
+            let msg = format!("+{} older board{}", self.hidden, if self.hidden == 1 { "" } else { "s" });
+            ctx.label(c, &msg, w / 2.0, y + Self::MORE * s / 2.0, 10.5, Weight::Medium, DIM, Align::Center);
+        }
+    }
+
+    fn render_board(&self, c: &mut Canvas, ctx: &mut Ctx, b: &BoardView, latest: bool, mut y: f32) -> f32 {
+        let s = ctx.s;
+        let x = Self::PAD * s;
+        let iw = c.width() - 2.0 * Self::PAD * s;
+        let w = c.width();
+        // Board header: turn, tier and how long ago.
+        let bh = (Self::BOARD_HEAD - 2.0) * s;
+        let by = y + 1.0 * s;
+        c.rect(x, by, iw, bh, HEADER);
+        c.rect(x, by, 3.0 * s, bh, if latest { GOLD } else { DIM });
+        let ago = self.turn - b.turn;
+        let when = match ago {
+            0 => "this turn".to_string(),
+            1 => "1 turn ago".to_string(),
+            n => format!("{n} turns ago"),
+        };
+        let title = format!("Turn {} · Tier {}", b.turn, b.tier);
+        ctx.label(c, &title, x + 9.0 * s, by + bh / 2.0, 11.5, Weight::Bold, if latest { TEXT } else { Rgba(200, 208, 228, 255) }, Align::Left);
+        ctx.label(c, &when, x + iw - 7.0 * s, by + bh / 2.0, 10.5, Weight::Medium, DIM, Align::Right);
+        y += Self::BOARD_HEAD * s;
+        if b.minions.is_empty() {
+            ctx.label(c, "Empty board", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
+            return y + Self::ROW * s;
+        }
         let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
-        for m in &self.minions {
+        for m in &b.minions {
             let rh = Self::ROW * s;
             ctx.tile_row(c, &m.card_id, x, y, iw, rh - 2.0 * s, base);
             let cy = y + (rh - 2.0 * s) / 2.0;
@@ -1096,6 +1158,7 @@ impl OpponentPopup {
             }
             y += rh;
         }
+        y
     }
 }
 
@@ -1144,5 +1207,36 @@ impl Calibration {
             c.stroke_rrect(x, y, w, h, 4.0, 2.0, color);
             ctx.label(c, &format!("{}", i + 1), x + 6.0, y + 12.0, 12.0, Weight::Bold, color, Align::Left);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn popup_drops_oldest_boards_to_fit() {
+        let minion = MinionView { card_id: "X".into(), name: "X".into(), attack: 1, health: 1, golden: false, keywords: vec![] };
+        let board = |turn| BoardView { turn, tier: 1, minions: vec![minion.clone(); 7] };
+        let mut p = OpponentPopup {
+            hero: "H".into(),
+            hero_card_id: "H".into(),
+            place: 1,
+            health: 30,
+            turn: 9,
+            boards: vec![board(9), board(6), board(3)],
+            hidden: 0,
+            images_rev: 0,
+        };
+        let full = p.size(1.0).1;
+        p.fit(1.0, full);
+        assert_eq!((p.boards.len(), p.hidden), (3, 0));
+        p.fit(1.0, full - 1);
+        assert_eq!(p.boards.iter().map(|b| b.turn).collect::<Vec<_>>(), [9, 6]);
+        assert_eq!(p.hidden, 1);
+        assert!(p.size(1.0).1 < full);
+        // The newest board stays even when it does not fit.
+        p.fit(1.0, 10);
+        assert_eq!((p.boards.len(), p.hidden), (1, 2));
     }
 }

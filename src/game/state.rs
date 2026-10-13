@@ -85,7 +85,7 @@ pub struct CombatSnapshot {
     pub opponent: Side,
 }
 
-/// An opponent's board as of the last combat against them.
+/// An opponent's board as of one combat against them.
 #[derive(Debug, Clone)]
 pub struct SeenBoard {
     pub turn: i32,
@@ -144,7 +144,8 @@ pub struct Game {
     pending_combat: Option<usize>,
     shop_seen: HashSet<i32>,
     shop_cards: Vec<String>,
-    boards: HashMap<i32, SeenBoard>,
+    /// Every board seen per lobby id, oldest first.
+    boards: HashMap<i32, Vec<SeenBoard>>,
     active: bool,
     over: bool,
     events: Vec<GameEvent>,
@@ -353,7 +354,10 @@ impl Game {
         let mut opponent = self.side(dummy_pid, dummy_e, false);
         opponent.lobby_id = self.entities[&dummy_e].tag(tags::BACON_CURRENT_COMBAT_PLAYER_ID);
         let turn = self.turn();
-        self.boards.insert(opponent.lobby_id, SeenBoard { turn, side: opponent.clone() });
+        let seen = self.boards.entry(opponent.lobby_id).or_default();
+        // A reconnect can replay the same combat.
+        seen.retain(|b| b.turn != turn);
+        seen.push(SeenBoard { turn, side: opponent.clone() });
         let anomalies = self
             .entities
             .values()
@@ -495,7 +499,12 @@ impl Game {
     }
 
     pub fn seen_board(&self, lobby_id: i32) -> Option<&SeenBoard> {
-        self.boards.get(&lobby_id)
+        self.seen_boards(lobby_id).last()
+    }
+
+    /// Every board seen for a lobby id, oldest first.
+    pub fn seen_boards(&self, lobby_id: i32) -> &[SeenBoard] {
+        self.boards.get(&lobby_id).map_or(&[], Vec::as_slice)
     }
 
     /// Lobby heroes ordered by leaderboard place (1 = top).
