@@ -25,10 +25,12 @@ impl ImageKind {
     fn urls(self, card_id: &str) -> Vec<String> {
         match self {
             ImageKind::Tile => vec![format!("https://art.hearthstonejson.com/v1/tiles/{card_id}.png")],
-            ImageKind::Render => vec![
-                format!("https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{card_id}.png"),
-                format!("https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{card_id}.png"),
-            ],
+            ImageKind::Render => {
+                let bgs = format!("https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{card_id}.png");
+                let regular = format!("https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{card_id}.png");
+                // Skip the round trip that is known to fail.
+                if card_id.contains("_HERO_") { vec![regular, bgs] } else { vec![bgs, regular] }
+            }
         }
     }
 
@@ -47,13 +49,15 @@ enum Job {
     Load(Key),
     /// Only make sure the file is in the disk cache.
     Fetch(Key),
+    /// Like `Fetch`, but only when nothing else is waiting.
+    Warm(Key),
 }
 
 /// Work shared by the worker threads. Loads go to the front so whatever the
-/// UI is waiting on overtakes background prefetches.
+/// UI is waiting on overtakes prefetches; cache warming runs when idle.
 #[derive(Default)]
 struct Queue {
-    jobs: Mutex<VecDeque<Job>>,
+    jobs: Mutex<(VecDeque<Job>, VecDeque<Job>)>,
     ready: Condvar,
 }
 
@@ -61,8 +65,9 @@ impl Queue {
     fn push(&self, job: Job) {
         let mut jobs = self.jobs.lock().unwrap();
         match job {
-            Job::Load(_) => jobs.push_front(job),
-            Job::Fetch(_) => jobs.push_back(job),
+            Job::Load(_) => jobs.0.push_front(job),
+            Job::Fetch(_) => jobs.0.push_back(job),
+            Job::Warm(_) => jobs.1.push_back(job),
         }
         self.ready.notify_one();
     }
@@ -70,13 +75,17 @@ impl Queue {
     fn pop(&self) -> Job {
         let mut jobs = self.jobs.lock().unwrap();
         loop {
-            if let Some(job) = jobs.pop_front() {
+            if let Some(job) = jobs.0.pop_front().or_else(|| jobs.1.pop_front()) {
                 return job;
             }
             jobs = self.ready.wait(jobs).unwrap();
         }
     }
 }
+
+/// Download threads. Images are small, so latency rather than bandwidth
+/// limits how fast a list of new cards fills in.
+const WORKERS: usize = 8;
 
 pub struct Images {
     loaded: HashMap<Key, Arc<Pixmap>>,
@@ -91,7 +100,7 @@ impl Images {
     pub fn new() -> Images {
         let queue = Arc::new(Queue::default());
         let (done, from_worker): (Sender<_>, _) = channel();
-        for _ in 0..4 {
+        for _ in 0..WORKERS {
             let queue = queue.clone();
             let done = done.clone();
             std::thread::spawn(move || loop {
@@ -102,7 +111,7 @@ impl Images {
                             return;
                         }
                     }
-                    Job::Fetch(key) => {
+                    Job::Fetch(key) | Job::Warm(key) => {
                         fetch(&key);
                     }
                 }
@@ -145,6 +154,17 @@ impl Images {
         }
         self.prefetched.insert(key.clone());
         self.queue.push(Job::Fetch(key));
+    }
+
+    /// Fills the disk cache with images the player may ask for later (for
+    /// example every card the search can list), behind all other work.
+    pub fn warm_cache<'a>(&mut self, kind: ImageKind, card_ids: impl IntoIterator<Item = &'a str>) {
+        for id in card_ids {
+            let key = (kind, id.to_string());
+            if !id.is_empty() && !cache_path(&key).is_file() && self.prefetched.insert(key.clone()) {
+                self.queue.push(Job::Warm(key));
+            }
+        }
     }
 
     /// Collects finished downloads. Returns true when something new arrived.

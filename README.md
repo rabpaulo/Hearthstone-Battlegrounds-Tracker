@@ -151,10 +151,13 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
 - `src/comps.rs`: tier list e guias de comps de
   `hsreplay.net/api/v1/battlegrounds/comp_guides/` (público, sem login).
 - `src/images.rs` + `src/net.rs`: imagens das cartas, baixadas e decodificadas
-  em 4 threads de fundo, com cache em disco (`tiles/` e `renders/` em
+  em 8 threads de fundo, com cache em disco (`tiles/` e `renders/` em
   `~/.cache/hsbg-overlay`). As renders das cartas da tier list são pré-baixadas
   ao abrir o painel, então o hover já encontra o arquivo pronto. Se a render do
-  modo Battlegrounds não existir (ex.: heróis), usa a render regular.
+  modo Battlegrounds não existir (ex.: heróis), usa a render regular. As tiles
+  de todas as cartas da busca são baixadas em segundo plano, só quando não há
+  outro trabalho, para os resultados aparecerem sem download enquanto você
+  digita.
 - `src/cards.rs`: base de cartas do export da Firestone, com as categorias da
   busca (minion, feitiço, herói, trinket, anomalia, recompensa).
 - `src/search.rs`: busca aproximada por nome (prefixo, palavras fora de ordem,

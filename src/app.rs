@@ -914,6 +914,11 @@ impl App {
         if ov.cfg.show_comps {
             ov.comps.refresh();
         }
+        // Search results then show their art straight from the disk cache
+        // instead of downloading a strip per row while the player types.
+        if ov.cfg.show_search {
+            ov.images.warm_cache(ImageKind::Tile, ov.db.searchable());
+        }
         log::info!("compositor {}", if x.compositing { "detected: translucent panels" } else { "not detected: opaque panels" });
         x.watch_root()?;
         let panels = Panels {

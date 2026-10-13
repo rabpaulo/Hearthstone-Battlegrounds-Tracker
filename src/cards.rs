@@ -423,6 +423,11 @@ impl CardDb {
         groups
     }
 
+    /// Every card the search can list.
+    pub fn searchable(&self) -> impl Iterator<Item = &str> {
+        self.searchable.iter().map(String::as_str)
+    }
+
     /// Cards matching a typed name, best first. An empty query lists the
     /// whole category by tier.
     pub fn search(&self, query: &str, category: Option<Category>) -> Vec<&Card> {
