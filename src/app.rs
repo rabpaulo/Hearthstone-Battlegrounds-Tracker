@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use x11rb::protocol::Event;
 
-use crate::cards::{CardDb, GroupKind, Tribe};
+use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe};
 use crate::comps::{CompGuide, Comps, CompsState};
 use crate::config::{Config, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
@@ -18,13 +18,17 @@ use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts};
 use crate::ui::panels::{
     self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
-    OpponentPopup, SimPanel, TierHit, TierList, TierRow, TierSection, TopBar, TopHit,
+    OpponentPopup, SearchHit, SearchPanel, SearchRow, SimPanel, TierHit, TierList, TierRow, TierSection, TopBar, TopHit,
 };
-use crate::x11::{GameWindow, OverlayWindow, Rect, X11};
+use crate::ui::draw::Rgba;
+use crate::x11::{GameWindow, Key, OverlayWindow, Rect, X11};
 
 const TICK: Duration = Duration::from_millis(30);
 /// Stop the simulator after this long without a Battlegrounds game.
 const SIM_IDLE: Duration = Duration::from_secs(10 * 60);
+/// Search results listed at once.
+const SEARCH_ROWS: usize = 60;
+const SEARCH_MAX_CHARS: usize = 40;
 
 #[derive(Debug, Default)]
 pub struct SimView {
@@ -56,6 +60,14 @@ pub struct UiState {
     /// Where the tier list was scrolled before opening a guide.
     pub comp_list_scroll: f32,
     pub comp_hover: Option<CompHit>,
+    pub search_open: bool,
+    pub search_query: String,
+    /// Card type the search is narrowed to.
+    pub search_category: Option<Category>,
+    /// Key presses go to the search field.
+    pub search_focus: bool,
+    pub search_scroll: f32,
+    pub search_hover: Option<SearchHit>,
 }
 
 impl UiState {
@@ -73,6 +85,83 @@ impl UiState {
             Some(CompHit::Item(i)) => Some(i),
             _ => None,
         }
+    }
+
+    /// Search result under the pointer or picked with the arrow keys.
+    pub fn search_row_hover(&self) -> Option<usize> {
+        match self.search_hover {
+            Some(SearchHit::Row(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Opens or closes a panel; only one of tiers, comps and search is open.
+    fn close_panels(&mut self) {
+        self.selected_tier = None;
+        self.comps_open = false;
+        self.search_open = false;
+        self.search_focus = false;
+    }
+
+    /// Applies a key typed into the search field. `rows` is the number of
+    /// results on screen. Returns whether the query changed.
+    pub fn search_key(&mut self, key: Key, rows: usize) -> bool {
+        let q = &mut self.search_query;
+        let edited = match key {
+            Key::Char(c) if !c.is_control() && q.chars().count() < SEARCH_MAX_CHARS => {
+                q.push(c);
+                true
+            }
+            Key::Char(_) => false,
+            Key::Backspace => q.pop().is_some(),
+            Key::DeleteWord => {
+                let keep = q.trim_end().rfind(' ').map(|i| i + 1).unwrap_or(0);
+                let changed = keep < q.len();
+                q.truncate(keep);
+                changed
+            }
+            Key::Clear => {
+                let changed = !q.is_empty();
+                q.clear();
+                changed
+            }
+            Key::Escape => {
+                self.search_open = false;
+                self.search_focus = false;
+                false
+            }
+            Key::Enter => {
+                self.search_focus = false;
+                false
+            }
+            Key::Tab | Key::BackTab => {
+                let order: Vec<Option<Category>> = std::iter::once(None).chain(Category::ALL.map(Some)).collect();
+                let at = order.iter().position(|k| *k == self.search_category).unwrap_or(0);
+                let step = if key == Key::Tab { 1 } else { order.len() - 1 };
+                self.search_category = order[(at + step) % order.len()];
+                true
+            }
+            Key::Up | Key::Down | Key::PageUp | Key::PageDown => {
+                if rows > 0 {
+                    let cur = self.search_row_hover();
+                    let next = match (key, cur) {
+                        (Key::Up, Some(i)) => i.saturating_sub(1),
+                        (Key::PageUp, Some(i)) => i.saturating_sub(8),
+                        (Key::Down, Some(i)) => i + 1,
+                        (Key::PageDown, Some(i)) => i + 8,
+                        _ => 0,
+                    };
+                    self.search_hover = Some(SearchHit::Row(next.min(rows - 1)));
+                }
+                false
+            }
+        };
+        if edited {
+            // The best match is highlighted, so its card shows right away.
+            self.search_scroll = 0.0;
+            self.search_hover = Some(SearchHit::Row(0));
+        }
+        edited
     }
 }
 
@@ -174,7 +263,13 @@ pub struct Overlay {
     lobby_memory: Option<LobbyRaces>,
     /// `GameState` of the last finished game: its tribes are stale.
     ended_game: Option<u64>,
+    /// Last search and the ids it found; panels redraw on every pointer
+    /// move, the query changes far less often.
+    search_cache: std::cell::RefCell<Option<SearchHits>>,
 }
+
+/// A query, the type it was narrowed to, and the ids it found.
+type SearchHits = (String, Option<Category>, Vec<String>);
 
 /// The lobby's tribes as far as they are known.
 #[derive(Debug, Clone, PartialEq)]
@@ -225,6 +320,7 @@ impl Overlay {
             last_combat: None,
             lobby_memory: None,
             ended_game: None,
+            search_cache: Default::default(),
             cfg,
         }
     }
@@ -273,6 +369,8 @@ impl Overlay {
                     self.ui.scroll = 0.0;
                     self.ui.comps_open = false;
                     self.ui.comp_id = None;
+                    self.ui.search_open = false;
+                    self.ui.search_focus = false;
                     self.last_combat = None;
                     self.comps.refresh();
                 }
@@ -348,6 +446,8 @@ impl Overlay {
             hover: self.ui.top_hover,
             comps: self.cfg.show_comps,
             comps_open: self.ui.comps_open,
+            search: self.cfg.show_search,
+            search_open: self.ui.search_open,
         }
     }
 
@@ -529,6 +629,52 @@ impl Overlay {
         items
     }
 
+    pub fn search_panel(&self) -> Option<SearchPanel> {
+        if !self.ui.search_open {
+            return None;
+        }
+        let query = self.ui.search_query.trim();
+        let category = self.ui.search_category;
+        let browsing = query.is_empty() && category.is_none();
+        let hits = if browsing { Vec::new() } else { self.search(query, category) };
+        let n = hits.len();
+        let subtitle = if browsing {
+            "Fuzzy search · Tab switches the card type".to_string()
+        } else {
+            match category {
+                Some(k) => k.count(n),
+                None => format!("{n} card{}", if n == 1 { "" } else { "s" }),
+            }
+        };
+        Some(SearchPanel {
+            query: self.ui.search_query.clone(),
+            focused: self.ui.search_focus,
+            category,
+            rows: hits.iter().take(SEARCH_ROWS).map(|c| search_row(c)).collect(),
+            more: n.saturating_sub(SEARCH_ROWS),
+            note: if browsing { "Type a name, or pick a card type".into() } else { "No cards match".into() },
+            subtitle,
+            scroll: self.ui.search_scroll,
+            hover: self.ui.search_hover,
+            images_rev: self.images.revision(),
+        })
+    }
+
+    fn search(&self, query: &str, category: Option<Category>) -> Vec<&Card> {
+        let mut cache = self.search_cache.borrow_mut();
+        let fresh = cache.as_ref().is_some_and(|(q, k, _)| q == query && *k == category);
+        if !fresh {
+            let ids = self.db.search(query, category).iter().map(|c| c.id.clone()).collect();
+            *cache = Some((query.to_string(), category, ids));
+        }
+        cache.as_ref().map(|(_, _, ids)| ids.iter().filter_map(|id| self.db.get(id)).collect()).unwrap_or_default()
+    }
+
+    pub fn search_preview(&self, panel: &SearchPanel) -> Option<CardPreview> {
+        let row = panel.row(self.ui.search_row_hover()?)?;
+        Some(CardPreview { card_id: row.card_id.clone(), images_rev: self.images.revision() })
+    }
+
     pub fn comp_preview(&self, panel: &CompPanel) -> Option<CardPreview> {
         match panel.item(self.ui.comp_item_hover()?)? {
             CompItem::Card { card_id, .. } => Some(CardPreview { card_id: card_id.clone(), images_rev: self.images.revision() }),
@@ -626,6 +772,43 @@ impl Overlay {
     }
 }
 
+/// One search result: type and the details that tell look-alikes apart.
+fn search_row(c: &Card) -> SearchRow {
+    let category = c.category.unwrap_or(Category::Minion);
+    let cost = (c.cost > 0).then(|| format!("{} gold", c.cost));
+    let (mut detail, color) = match category {
+        Category::Minion => {
+            let tribes = if c.all_tribes {
+                "All tribes".to_string()
+            } else if c.tribes.is_empty() {
+                "Neutral".to_string()
+            } else {
+                c.tribes.iter().map(|t| t.label()).collect::<Vec<_>>().join(", ")
+            };
+            let kind = if c.timewarped { "Timewarped minion" } else { "Minion" };
+            let color = match c.tribes.first() {
+                _ if c.all_tribes => panels::theme::GOLD,
+                Some(&t) => panels::tribe_color(t),
+                None => panels::theme::DIM,
+            };
+            (vec![kind.to_string(), tribes], color)
+        }
+        Category::Spell => (vec!["Tavern spell".to_string()], panels::theme::ACCENT),
+        Category::Hero => (vec!["Hero".to_string()], panels::theme::GOLD),
+        Category::Trinket => (vec!["Trinket".to_string()], Rgba::hex(0x9c6ad6)),
+        Category::Anomaly => (vec!["Anomaly".to_string()], Rgba::hex(0x2a9d8f)),
+        Category::Reward => (vec!["Quest reward".to_string()], panels::theme::WIN),
+    };
+    if matches!(category, Category::Spell | Category::Trinket) {
+        detail.extend(cost);
+    }
+    if c.duos_only {
+        detail.push("Duos only".to_string());
+    }
+    let tier = if matches!(c.kind, Kind::Minion | Kind::TavernSpell) && category != Category::Hero { c.tier } else { 0 };
+    SearchRow { card_id: c.id.clone(), name: c.name.clone(), detail: detail.join(" · "), color, tier }
+}
+
 // ---- X11 application -----------------------------------------------------
 
 struct Panel<M> {
@@ -670,19 +853,21 @@ struct Panels {
     top: Panel<TopBar>,
     tiers: Panel<TierList>,
     comps: Panel<CompPanel>,
+    search: Panel<SearchPanel>,
     preview: Panel<CardPreview>,
     popup: Panel<OpponentPopup>,
     calib: Panel<Calibration>,
 }
 
 impl Panels {
-    fn windows(&self) -> [&OverlayWindow; 8] {
+    fn windows(&self) -> [&OverlayWindow; 9] {
         [
             &self.info.win,
             &self.sim.win,
             &self.top.win,
             &self.tiers.win,
             &self.comps.win,
+            &self.search.win,
             &self.calib.win,
             &self.preview.win,
             &self.popup.win,
@@ -695,6 +880,7 @@ impl Panels {
         self.top.hide(x);
         self.tiers.hide(x);
         self.comps.hide(x);
+        self.search.hide(x);
         self.preview.hide(x);
         self.popup.hide(x);
         self.calib.hide(x);
@@ -711,6 +897,8 @@ pub struct App {
     game_window: Option<GameWindow>,
     active: Option<u32>,
     calibrate: bool,
+    /// The search field holds the keyboard.
+    keyboard_grabbed: bool,
     need_raise: bool,
     /// Something changed since the last draw.
     dirty: bool,
@@ -734,6 +922,7 @@ impl App {
             top: Panel::new(&x, "hsbg-tiers-bar", true)?,
             tiers: Panel::new(&x, "hsbg-tiers", true)?,
             comps: Panel::new(&x, "hsbg-comps", true)?,
+            search: Panel::new(&x, "hsbg-search", true)?,
             preview: Panel::new(&x, "hsbg-preview", false)?,
             popup: Panel::new(&x, "hsbg-opponent", false)?,
             calib: Panel::new(&x, "hsbg-calibration", false)?,
@@ -749,6 +938,7 @@ impl App {
             game_window: None,
             active: None,
             calibrate,
+            keyboard_grabbed: false,
             need_raise: true,
             dirty: true,
             last_window_check: None,
@@ -775,6 +965,7 @@ impl App {
             if std::mem::take(&mut self.dirty) {
                 self.draw();
             }
+            self.sync_keyboard();
             self.raise_if_needed();
             self.x.flush();
             if self.ov.game.in_progress() {
@@ -917,18 +1108,28 @@ impl App {
                     let ui = &mut self.ov.ui;
                     match hit {
                         Some(TopHit::Tier(t)) => {
-                            ui.selected_tier = if ui.selected_tier == Some(t) { None } else { Some(t) };
+                            let open = ui.selected_tier != Some(t);
+                            ui.close_panels();
+                            ui.selected_tier = open.then_some(t);
                             ui.scroll = 0.0;
                             ui.list_hover = None;
-                            ui.comps_open = false;
                         }
                         Some(TopHit::Comps) => {
-                            ui.comps_open = !ui.comps_open;
+                            let open = !ui.comps_open;
+                            ui.close_panels();
+                            ui.comps_open = open;
                             ui.comp_hover = None;
-                            ui.selected_tier = None;
                             if ui.comps_open {
                                 self.ov.comps.refresh();
                             }
+                        }
+                        Some(TopHit::Search) => {
+                            let open = !ui.search_open;
+                            ui.close_panels();
+                            // Ready to type as soon as it opens.
+                            ui.search_open = open;
+                            ui.search_focus = open;
+                            ui.search_hover = None;
                         }
                         None => {}
                     }
@@ -977,6 +1178,48 @@ impl App {
                     }
                     ui.comp_hover = None;
                 }
+                Event::ButtonPress(e) if e.event == self.panels.search.win.id && (e.detail == 4 || e.detail == 5) => {
+                    let step = 36.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
+                    if let Some(m) = self.panels.search.model() {
+                        let max = m.max_scroll(s, self.panels.search.win.rect.h);
+                        self.ov.ui.search_scroll = (self.ov.ui.search_scroll + step).clamp(0.0, max);
+                        self.ov.ui.search_hover = m.hit(e.event_x as f32, e.event_y as f32, s);
+                    }
+                }
+                Event::ButtonPress(e) if e.event == self.panels.search.win.id && e.detail == 3 => {
+                    self.ov.ui.close_panels();
+                }
+                Event::ButtonPress(e) if e.event == self.panels.search.win.id && e.detail == 1 => {
+                    let hit = self.panels.search.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let ui = &mut self.ov.ui;
+                    match hit {
+                        Some(SearchHit::Field) => ui.search_focus = true,
+                        Some(SearchHit::Clear) => {
+                            ui.search_query.clear();
+                            ui.search_scroll = 0.0;
+                            ui.search_focus = true;
+                        }
+                        Some(SearchHit::Category(k)) => {
+                            ui.search_category = k;
+                            ui.search_scroll = 0.0;
+                            ui.search_hover = None;
+                        }
+                        Some(SearchHit::Row(_)) | None => {}
+                    }
+                }
+                Event::KeyPress(e) if self.keyboard_grabbed => {
+                    if let Some(key) = self.x.key(e.detail, e.state) {
+                        let rows = self.panels.search.model().map(|m| m.rows.len()).unwrap_or(0);
+                        self.ov.ui.search_key(key, rows);
+                        // Arrow keys: keep the picked row in view.
+                        if let (Some(i), Some(m)) = (self.ov.ui.search_row_hover(), self.panels.search.model()) {
+                            if matches!(key, Key::Up | Key::Down | Key::PageUp | Key::PageDown) {
+                                self.ov.ui.search_scroll = m.scroll_to(i, s, self.panels.search.win.rect.h);
+                            }
+                        }
+                    }
+                }
+                Event::MappingNotify(_) => self.x.reload_keymap(),
                 Event::ButtonPress(e) if e.event == self.panels.tiers.win.id && (e.detail == 4 || e.detail == 5) => {
                     let step = 27.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
                     if let Some(m) = self.panels.tiers.model() {
@@ -1022,6 +1265,10 @@ impl App {
                         }
                     });
                 }
+                Event::MotionNotify(e) if e.event == self.panels.search.win.id => {
+                    self.ov.ui.search_hover =
+                        self.panels.search.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                }
                 Event::MotionNotify(e) if e.event == self.panels.tiers.win.id => {
                     self.ov.ui.list_hover =
                         self.panels.tiers.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
@@ -1029,6 +1276,7 @@ impl App {
                 Event::LeaveNotify(e) if e.event == self.panels.top.win.id => self.ov.ui.top_hover = None,
                 Event::LeaveNotify(e) if e.event == self.panels.comps.win.id => self.ov.ui.comp_hover = None,
                 Event::LeaveNotify(e) if e.event == self.panels.tiers.win.id => self.ov.ui.list_hover = None,
+                Event::LeaveNotify(e) if e.event == self.panels.search.win.id => self.ov.ui.search_hover = None,
                 Event::ConfigureNotify(e) if !self.is_ours(e.window) => self.need_raise = true,
                 Event::MapNotify(e) if !self.is_ours(e.window) => self.need_raise = true,
                 _ => {}
@@ -1041,13 +1289,49 @@ impl App {
             return;
         }
         self.last_pointer = Some(Instant::now());
-        let hover = match (self.layout(), self.visible()) {
-            (Some(l), true) => self.x.pointer().and_then(|(px, py)| l.slot_at(px, py)),
+        let pointer = match (self.layout(), self.visible()) {
+            (Some(l), true) => self.x.pointer().map(|p| (l, p)),
             _ => None,
         };
+        let hover = pointer.and_then(|(l, (px, py, _))| l.slot_at(px, py));
+        // A click outside the overlay gives the keyboard back to the game
+        // (clicks on the panels arrive as events).
+        if let Some((_, (px, py, true))) = pointer {
+            let on_panel = self.panels.windows().iter().any(|w| w.mapped && w.rect.contains(px, py));
+            if self.ov.ui.search_focus && !on_panel {
+                self.ov.ui.search_focus = false;
+                self.dirty = true;
+            }
+        }
         if hover != self.ov.ui.slot_hover {
             self.ov.ui.slot_hover = hover;
             self.dirty = true;
+        }
+    }
+
+    /// Grabs the keyboard while the search field is focused and on screen,
+    /// and gives it back otherwise.
+    fn sync_keyboard(&mut self) {
+        let ui = &mut self.ov.ui;
+        let mapped = self.panels.search.win.mapped;
+        // Hidden (game unfocused or gone): stay unfocused when it returns.
+        if self.keyboard_grabbed && !mapped {
+            ui.search_focus = false;
+        }
+        let want = ui.search_open && ui.search_focus && mapped;
+        if want == self.keyboard_grabbed {
+            return;
+        }
+        if want {
+            self.keyboard_grabbed = self.x.grab_keyboard(self.panels.search.win.id);
+            if !self.keyboard_grabbed {
+                log::warn!("could not grab the keyboard for the search field");
+                ui.search_focus = false;
+                self.dirty = true;
+            }
+        } else {
+            self.x.ungrab_keyboard();
+            self.keyboard_grabbed = false;
         }
     }
 
@@ -1066,12 +1350,17 @@ impl App {
         let tiers = self.ov.tier_list();
         let popup = self.ov.ui.slot_hover.and_then(|slot| self.ov.popup(slot).map(|p| (slot, p)));
         let comps = self.ov.comp_panel();
+        let search = self.ov.search_panel();
         // Card under the pointer, with the item it belongs to.
         let preview = tiers
             .as_ref()
             .and_then(|t| self.ov.preview(t))
             .map(|pv| (pv, self.ov.ui.row_hover().unwrap_or(0)))
-            .or_else(|| comps.as_ref().and_then(|c| self.ov.comp_preview(c)).map(|pv| (pv, self.ov.ui.comp_item_hover().unwrap_or(0))));
+            .or_else(|| comps.as_ref().and_then(|c| self.ov.comp_preview(c)).map(|pv| (pv, self.ov.ui.comp_item_hover().unwrap_or(0))))
+            .or_else(|| {
+                let pv = search.as_ref().and_then(|p| self.ov.search_preview(p))?;
+                Some((pv, self.ov.ui.search_row_hover().unwrap_or(0)))
+            });
         // Hover previews then only need a decode, not a download.
         if let Some(list) = &tiers {
             for row in list.sections.iter().flat_map(|sec| &sec.rows) {
@@ -1083,6 +1372,12 @@ impl App {
                 if let CompItem::Card { card_id, .. } = item {
                     self.ov.images.prefetch(ImageKind::Render, card_id);
                 }
+            }
+        }
+        // Only the best matches: the results change with every key.
+        if let Some(panel) = &search {
+            for row in panel.rows.iter().take(8) {
+                self.ov.images.prefetch(ImageKind::Render, &row.card_id);
             }
         }
 
@@ -1098,7 +1393,7 @@ impl App {
             p.info.hide(x);
         }
         let top_rect = layout.top_bar(top.size(s));
-        let show_top = in_game && (cfg.show_tiers || cfg.show_comps);
+        let show_top = in_game && (cfg.show_tiers || cfg.show_comps || cfg.show_search);
         if in_game && cfg.show_simulation && self.ov.game.turn() >= 1 {
             let rect = layout.sim(sim.size(s), show_top.then_some(top_rect));
             p.sim.update(x, rect, &sim, &mut ctx, |m, c, ctx| m.render(c, ctx));
@@ -1131,6 +1426,16 @@ impl App {
                 hovered_at = hovered_at.or_else(|| preview.as_ref().map(|(_, i)| (rect, panel.item_center(*i, s).unwrap_or(0.0))));
             }
             _ => p.comps.hide(x),
+        }
+        match &search {
+            Some(panel) if show_top && cfg.show_search => {
+                let (tx, ty, max_h) = layout.tier_list(top_rect, (SearchPanel::W * s).ceil() as i32);
+                let (w, h) = panel.size(s, max_h);
+                let rect = Rect::new(tx, ty, w, h);
+                p.search.update(x, rect, panel, &mut ctx, |m, c, ctx| m.render(c, ctx));
+                hovered_at = hovered_at.or_else(|| preview.as_ref().map(|(_, i)| (rect, panel.row_center(*i, s).unwrap_or(0.0))));
+            }
+            _ => p.search.hide(x),
         }
         let preview_rect = match (&preview, hovered_at) {
             (Some((pv, _)), Some((pr, center))) => pv.size(s, ctx.images).map(|(w, h)| {
@@ -1299,6 +1604,21 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         }
         Err(e) => log::warn!("{e:#}"),
     }
+    // Search: a typed name with its best match highlighted, and a browsed type.
+    let mut search_panels = Vec::new();
+    ov.ui.search_open = true;
+    ov.ui.search_focus = true;
+    ov.ui.search_query = "brann bronz".into();
+    ov.ui.search_hover = Some(SearchHit::Row(0));
+    search_panels.extend(ov.search_panel().map(|p| ("search", p)));
+    ov.ui.search_query = "rivnedare".into();
+    search_panels.extend(ov.search_panel().map(|p| ("search-typo", p)));
+    ov.ui.search_query.clear();
+    ov.ui.search_focus = false;
+    ov.ui.search_hover = None;
+    ov.ui.search_category = Some(Category::Hero);
+    search_panels.extend(ov.search_panel().map(|p| ("search-heroes", p)));
+    ov.ui.search_open = false;
     let ids: Vec<String> = comp_panels
         .iter()
         .flat_map(|(_, p)| &p.items)
@@ -1307,6 +1627,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
             CompItem::Card { card_id, .. } => Some(card_id.clone()),
             _ => None,
         })
+        .chain(search_panels.iter().flat_map(|(_, p)| p.rows.iter().take(25).map(|r| r.card_id.clone())))
         .collect();
     let deadline = Instant::now() + Duration::from_secs(20);
     while ids.iter().filter(|id| ov.images.get(ImageKind::Tile, id).is_none()).count() > 0 && Instant::now() < deadline {
@@ -1320,6 +1641,11 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| l.render(c, ctx))?;
     }
     for (name, p) in &comp_panels {
+        let (w, h) = p.size(s, (hs.h as f32 * 0.85) as i32);
+        let mut scratch = Canvas::new(w, h);
+        emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| p.render(c, ctx))?;
+    }
+    for (name, p) in &search_panels {
         let (w, h) = p.size(s, (hs.h as f32 * 0.85) as i32);
         let mut scratch = Canvas::new(w, h);
         emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| p.render(c, ctx))?;
@@ -1526,6 +1852,54 @@ mod tests {
         let guide = ov.comp_panel().unwrap();
         assert_eq!(guide.detail, Some("S"));
         assert!(guide.items.iter().any(|i| matches!(i, CompItem::Card { card_id, tier: 2, .. } if card_id == "B1")));
+    }
+
+    #[test]
+    fn search_typing_tab_and_escape() {
+        let cards = r#"[
+            {"id":"B1","name":"Brann Bronzebeard","type":"Minion","techLevel":5,"isBaconPool":true},
+            {"id":"H1","name":"Dinotamer Brann","type":"Hero","battlegroundsHero":true},
+            {"id":"T1","name":"Bronze Charm","type":"Battleground_trinket","isBaconPool":true,"cost":2}
+        ]"#;
+        let mut ov = overlay();
+        ov.db = CardDb::parse(cards.as_bytes(), Path::new("test")).unwrap();
+        ov.ui.search_open = true;
+        assert!(ov.search_panel().unwrap().rows.is_empty(), "nothing listed before typing");
+        for c in "bran".chars() {
+            ov.ui.search_key(Key::Char(c), 0);
+        }
+        let panel = ov.search_panel().unwrap();
+        let names: Vec<_> = panel.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Brann Bronzebeard", "Dinotamer Brann", "Bronze Charm"]);
+        assert_eq!((panel.rows[0].tier, panel.rows[0].detail.as_str()), (5, "Minion · Neutral"));
+        assert_eq!(panel.rows[2].detail, "Trinket · 2 gold");
+        assert_eq!(ov.search_preview(&panel).unwrap().card_id, "B1", "best match previewed while typing");
+        ov.ui.search_key(Key::Down, panel.rows.len());
+        assert_eq!(ov.ui.search_row_hover(), Some(1));
+        // Tab narrows to the next type: minions.
+        ov.ui.search_key(Key::Tab, 0);
+        assert_eq!(ov.search_panel().unwrap().rows.len(), 1);
+        ov.ui.search_key(Key::Tab, 0);
+        ov.ui.search_key(Key::Tab, 0);
+        assert_eq!(ov.search_panel().unwrap().rows[0].card_id, "H1");
+        ov.ui.search_key(Key::DeleteWord, 0);
+        assert_eq!(ov.ui.search_query, "");
+        ov.ui.search_key(Key::Escape, 0);
+        assert!(ov.search_panel().is_none());
+    }
+
+    #[test]
+    fn search_panel_hit_testing() {
+        let mut ov = overlay();
+        ov.ui.search_open = true;
+        ov.ui.search_query = "bat".into();
+        let panel = ov.search_panel().unwrap();
+        // Field right under the 40px title, its "×" at the right end.
+        assert_eq!(panel.hit(100.0, 55.0, 1.0), Some(SearchHit::Field));
+        assert_eq!(panel.hit(260.0, 55.0, 1.0), Some(SearchHit::Clear));
+        // Chip grid: "All" first, then the types in order.
+        assert_eq!(panel.hit(20.0, 88.0, 1.0), Some(SearchHit::Category(None)));
+        assert_eq!(panel.hit(100.0, 88.0, 1.0), Some(SearchHit::Category(Some(Category::Minion))));
     }
 
     #[test]

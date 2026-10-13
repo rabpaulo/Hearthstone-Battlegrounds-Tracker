@@ -11,9 +11,10 @@ só para as tribos da lobby, um campo da memória do cliente.
 | Chances do combate | topo, centro | Letal / Vitória / Empate / Derrota / Letal, simuladas no início de cada combate (fica esmaecido na loja mostrando o último combate) |
 | Turno + tiers | topo, direita | Turno atual e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
 | Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
+| Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
 | Tribos + partidas | esquerda | Tribos da lobby e as últimas partidas com colocação e média da sessão |
-| Tabuleiro do oponente | ao passar o mouse no leaderboard | Último tabuleiro visto daquele jogador (stats, palavras-chave, tier, há quantos turnos) |
+| Tabuleiro do oponente | ao passar o mouse no leaderboard | Todos os tabuleiros vistos daquele jogador, do mais recente ao mais antigo (stats, palavras-chave, tier, há quantos turnos) |
 
 Não incluído: estatísticas exclusivas do HSReplay Premium (MMR e
 estatísticas de heróis/comps) e o MMR do jogador.
@@ -35,6 +36,25 @@ tier desde a última atualização.
 
 Os guias são baixados em segundo plano e ficam em cache por 6 h
 (`~/.cache/hsbg-overlay/comp_guides.json`); sem rede, o cache antigo é usado.
+
+### Busca de cartas
+
+O botão **Search** na barra do topo abre um campo de busca já pronto para
+digitar. A busca é aproximada: aceita parte do nome (`bran`), abreviações
+(`kalcgs`), palavras fora de ordem (`riven titus`) e erros de digitação
+(`rivnedare`). A melhor carta fica destacada e aparece ao lado enquanto você
+digita.
+
+- **Tipo**: All, Minion, Spell, Hero, Trinket, Anomaly ou Reward. Com um tipo
+  escolhido e o campo vazio, a lista mostra todas as cartas desse tipo.
+- Teclado: **↑/↓** e **PgUp/PgDn** escolhem o resultado, **Tab** /
+  **Shift+Tab** trocam o tipo, **Ctrl+W** / **Ctrl+Backspace** apagam uma
+  palavra, **Ctrl+U** limpa, **Enter** devolve o teclado ao jogo (o painel
+  fica aberto) e **Esc** fecha.
+- Janelas de overlay não recebem foco no X11, então enquanto o campo está
+  ativo o overlay prende o teclado (como o dmenu): o jogo e os atalhos do dwm
+  não recebem teclas até **Enter**, **Esc** ou um clique fora do painel.
+  Clique no campo para voltar a digitar. Botão direito fecha o painel.
 
 ### Lista de minions
 
@@ -83,7 +103,10 @@ não confirmadas com `?`.
 ```
 
 Compila em modo release, instala `~/.local/bin/hsbg-overlay` e o simulador em
-`~/.local/share/hsbg-overlay/sidecar` (`npm ci`). Para rodar direto do
+`~/.local/share/hsbg-overlay/sidecar` (`npm ci`). Para atualizar, rode
+`./install.sh` de novo: ele puxa os commits novos do branch remoto (se não
+houver alterações locais), recompila e só substitui o que mudou; reinicie o
+overlay em seguida se ele estiver aberto. Para rodar direto do
 repositório: `(cd sidecar && npm ci)` e `cargo run --release`.
 
 No dwm, inicie junto com a sessão (por exemplo no `~/.xinitrc`):
@@ -130,7 +153,12 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
 - `src/images.rs` + `src/net.rs`: imagens das cartas, baixadas e decodificadas
   em 4 threads de fundo, com cache em disco (`tiles/` e `renders/` em
   `~/.cache/hsbg-overlay`). As renders das cartas da tier list são pré-baixadas
-  ao abrir o painel, então o hover já encontra o arquivo pronto.
+  ao abrir o painel, então o hover já encontra o arquivo pronto. Se a render do
+  modo Battlegrounds não existir (ex.: heróis), usa a render regular.
+- `src/cards.rs`: base de cartas do export da Firestone, com as categorias da
+  busca (minion, feitiço, herói, trinket, anomalia, recompensa).
+- `src/search.rs`: busca aproximada por nome (prefixo, palavras fora de ordem,
+  abreviações e erros de digitação), usada pelo painel **Search**.
 - `src/x11.rs` + `src/ui`: janelas ARGB override-redirect desenhadas com
   tiny-skia/fontdue; posições relativas à janela do jogo, que é rastreada a
   cada 250 ms.

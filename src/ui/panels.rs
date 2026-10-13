@@ -5,7 +5,7 @@
 //! scales them to the actual window.
 
 use super::draw::{Align, Canvas, Fonts, Rgba, Weight};
-use crate::cards::{Tribe, KEYWORDS};
+use crate::cards::{Category, Tribe, KEYWORDS};
 use crate::images::{ImageKind, Images};
 
 pub mod theme {
@@ -111,6 +111,7 @@ fn s_ceil(v: f32, s: f32) -> i32 {
 pub enum TopHit {
     Tier(i32),
     Comps,
+    Search,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,27 +124,50 @@ pub struct TopBar {
     /// Show the comps button, and whether its panel is open.
     pub comps: bool,
     pub comps_open: bool,
+    /// Same for the card search button.
+    pub search: bool,
+    pub search_open: bool,
 }
 
 impl TopBar {
     const H: f32 = 38.0;
     const TURN_W: f32 = 84.0;
-    const COMPS_W: f32 = 64.0;
+    const TOOL_W: f32 = 64.0;
     const BTN: f32 = 30.0;
     const GAP: f32 = 4.0;
     const PAD: f32 = 4.0;
 
-    fn comps_x() -> f32 {
-        Self::PAD + Self::TURN_W + Self::GAP * 2.0
+    /// Buttons between the turn counter and the tiers, left to right.
+    fn tools(&self) -> Vec<(TopHit, &'static str, bool)> {
+        let mut tools = Vec::new();
+        if self.comps {
+            tools.push((TopHit::Comps, "Comps", self.comps_open));
+        }
+        if self.search {
+            tools.push((TopHit::Search, "Search", self.search_open));
+        }
+        tools
+    }
+
+    fn tool_x(i: usize) -> f32 {
+        Self::PAD + Self::TURN_W + Self::GAP * 2.0 + i as f32 * (Self::TOOL_W + Self::GAP)
+    }
+
+    /// Right edge of the last tool button.
+    fn tools_end(&self) -> f32 {
+        match self.tools().len() {
+            0 => Self::tool_x(0),
+            n => Self::tool_x(n - 1) + Self::TOOL_W,
+        }
     }
 
     fn tiers_x(&self) -> f32 {
-        Self::comps_x() + if self.comps { Self::COMPS_W + Self::GAP * 3.0 } else { 0.0 }
+        self.tools_end() + if self.tools().is_empty() { 0.0 } else { Self::GAP * 3.0 }
     }
 
     pub fn size(&self, s: f32) -> (i32, i32) {
         let w = match self.max_tier {
-            0 => Self::comps_x() + if self.comps { Self::COMPS_W + Self::PAD } else { 0.0 },
+            0 => self.tools_end() + if self.tools().is_empty() { 0.0 } else { Self::PAD },
             n => self.tiers_x() + n as f32 * (Self::BTN + Self::GAP) - Self::GAP + Self::PAD,
         };
         (s_ceil(w, s), s_ceil(Self::H, s))
@@ -155,8 +179,10 @@ impl TopBar {
 
     pub fn hit(&self, x: f32, s: f32) -> Option<TopHit> {
         let x = x / s;
-        if self.comps && x >= Self::comps_x() && x < Self::comps_x() + Self::COMPS_W {
-            return Some(TopHit::Comps);
+        for (i, (hit, _, _)) in self.tools().into_iter().enumerate() {
+            if x >= Self::tool_x(i) && x < Self::tool_x(i) + Self::TOOL_W {
+                return Some(hit);
+            }
         }
         (1..=self.max_tier)
             .find(|&t| {
@@ -182,13 +208,14 @@ impl TopBar {
         } else {
             BUTTON
         };
-        if self.comps {
-            let (bx, bw) = (Self::comps_x() * s, Self::COMPS_W * s);
-            c.rrect(bx, by, bw, b, 5.0 * s, fill(self.comps_open, self.hover == Some(TopHit::Comps)));
-            ctx.label(c, "Comps", bx + bw / 2.0, by + b / 2.0, 13.0, Weight::Bold, TEXT, Align::Center);
-            if self.max_tier > 0 {
-                sep(c, Self::comps_x() + Self::COMPS_W + Self::GAP * 1.5);
-            }
+        let tools = self.tools();
+        for (i, (hit, label, open)) in tools.iter().enumerate() {
+            let (bx, bw) = (Self::tool_x(i) * s, Self::TOOL_W * s);
+            c.rrect(bx, by, bw, b, 5.0 * s, fill(*open, self.hover == Some(*hit)));
+            ctx.label(c, label, bx + bw / 2.0, by + b / 2.0, 13.0, Weight::Bold, TEXT, Align::Center);
+        }
+        if !tools.is_empty() && self.max_tier > 0 {
+            sep(c, self.tools_end() + Self::GAP * 1.5);
         }
         for t in 1..=self.max_tier {
             let bx = self.button_x(t) * s;
@@ -823,6 +850,285 @@ impl CompPanel {
                 }
                 CompItem::Gap => {}
             }
+        }
+    }
+}
+
+// ---- card search ---------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchRow {
+    pub card_id: String,
+    pub name: String,
+    /// Type, tier, tribes, cost.
+    pub detail: String,
+    pub color: Rgba,
+    /// Tavern tier badge; 0 for cards without one.
+    pub tier: i32,
+}
+
+/// What the pointer is over in the search panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchHit {
+    Field,
+    /// The "×" that empties the field.
+    Clear,
+    /// A type chip; `None` is "All".
+    Category(Option<Category>),
+    Row(usize),
+}
+
+/// Text field, card type chips and the cards matching the query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchPanel {
+    pub query: String,
+    /// Typing goes to the field (the keyboard is grabbed).
+    pub focused: bool,
+    pub category: Option<Category>,
+    pub rows: Vec<SearchRow>,
+    /// Matches left out of `rows`.
+    pub more: usize,
+    /// Shown instead of rows when there are none.
+    pub note: String,
+    pub subtitle: String,
+    pub scroll: f32,
+    pub hover: Option<SearchHit>,
+    pub images_rev: u64,
+}
+
+impl SearchPanel {
+    pub const W: f32 = 280.0;
+    const TITLE: f32 = 40.0;
+    const FIELD: f32 = 36.0;
+    const CHIP_H: f32 = 22.0;
+    const CHIP_COLS: usize = 4;
+    const GAP: f32 = 4.0;
+    const ROW: f32 = 36.0;
+    const FOOT: f32 = 26.0;
+    const PAD: f32 = 4.0;
+    const CLEAR_W: f32 = 28.0;
+
+    fn chips() -> impl Iterator<Item = Option<Category>> {
+        std::iter::once(None).chain(Category::ALL.into_iter().map(Some))
+    }
+
+    fn header_h() -> f32 {
+        let rows = (Category::ALL.len() + 1).div_ceil(Self::CHIP_COLS) as f32;
+        Self::TITLE + Self::FIELD + rows * (Self::CHIP_H + Self::GAP) + Self::GAP
+    }
+
+    fn field_box() -> Box2 {
+        Box2 { x: Self::PAD + 2.0, y: Self::TITLE, w: Self::W - 2.0 * Self::PAD - 4.0, h: Self::FIELD - 6.0 }
+    }
+
+    fn chip_box(i: usize) -> Box2 {
+        let inner = Self::W - 2.0 * Self::PAD - 4.0;
+        let cw = (inner - Self::GAP * (Self::CHIP_COLS - 1) as f32) / Self::CHIP_COLS as f32;
+        let (col, row) = (i % Self::CHIP_COLS, i / Self::CHIP_COLS);
+        Box2 {
+            x: Self::PAD + 2.0 + col as f32 * (cw + Self::GAP),
+            y: Self::TITLE + Self::FIELD + Self::GAP / 2.0 + row as f32 * (Self::CHIP_H + Self::GAP),
+            w: cw,
+            h: Self::CHIP_H,
+        }
+    }
+
+    fn content_h(&self) -> f32 {
+        let rows = if self.rows.is_empty() { Self::ROW } else { self.rows.len() as f32 * Self::ROW };
+        Self::header_h() + rows + if self.more > 0 { Self::FOOT } else { 0.0 } + Self::PAD
+    }
+
+    pub fn size(&self, s: f32, max_h: i32) -> (i32, i32) {
+        (s_ceil(Self::W, s), s_ceil(self.content_h(), s).min(max_h))
+    }
+
+    pub fn max_scroll(&self, s: f32, h: i32) -> f32 {
+        (self.content_h() * s - h as f32).max(0.0)
+    }
+
+    fn row_top(i: usize) -> f32 {
+        Self::header_h() + i as f32 * Self::ROW
+    }
+
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<SearchHit> {
+        let (ux, uy) = (x / s, y / s);
+        if uy < Self::TITLE {
+            return None;
+        }
+        if uy < Self::TITLE + Self::FIELD {
+            let field = Self::field_box();
+            if !field.contains(ux, uy) {
+                return None;
+            }
+            let on_clear = !self.query.is_empty() && ux >= field.x + field.w - Self::CLEAR_W;
+            return Some(if on_clear { SearchHit::Clear } else { SearchHit::Field });
+        }
+        if uy < Self::header_h() {
+            return Self::chips().enumerate().find(|(i, _)| Self::chip_box(*i).contains(ux, uy)).map(|(_, k)| SearchHit::Category(k));
+        }
+        let cy = (y + self.scroll) / s;
+        let i = ((cy - Self::header_h()) / Self::ROW).floor();
+        (i >= 0.0 && (i as usize) < self.rows.len()).then_some(SearchHit::Row(i as usize))
+    }
+
+    pub fn row(&self, i: usize) -> Option<&SearchRow> {
+        self.rows.get(i)
+    }
+
+    /// Window-local vertical centre of a row.
+    pub fn row_center(&self, i: usize, s: f32) -> Option<f32> {
+        (i < self.rows.len()).then(|| (Self::row_top(i) + Self::ROW / 2.0) * s - self.scroll)
+    }
+
+    /// Scroll offset that brings row `i` into view in a window `h` tall.
+    pub fn scroll_to(&self, i: usize, s: f32, h: i32) -> f32 {
+        let top = Self::row_top(i) * s;
+        let bottom = top + Self::ROW * s;
+        let view = h as f32 - Self::header_h() * s;
+        let scroll = if top - Self::header_h() * s < self.scroll {
+            top - Self::header_h() * s
+        } else if bottom - Self::header_h() * s > self.scroll + view {
+            bottom - Self::header_h() * s - view
+        } else {
+            self.scroll
+        };
+        scroll.clamp(0.0, self.max_scroll(s, h))
+    }
+
+    pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let w = c.width();
+        ctx.panel(c);
+        self.render_rows(c, ctx);
+        // Header drawn last so scrolled rows slide under it.
+        let hh = Self::header_h() * s;
+        if ctx.opaque {
+            c.rect(0.0, 0.0, w, hh, BG_OPAQUE);
+        } else {
+            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, BG_OPAQUE);
+            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, BG_OPAQUE);
+        }
+        ctx.label(c, "Card Search", 12.0 * s, 15.0 * s, 14.0, Weight::Bold, GOLD, Align::Left);
+        let subtitle = ctx.fonts.fit(&self.subtitle, 10.0 * s, Weight::Medium, w - 24.0 * s);
+        ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, DIM, Align::Left);
+        self.render_field(c, ctx);
+        self.render_chips(c, ctx);
+        c.rect(0.0, hh - 1.0, w, 1.0, BORDER);
+        let max_scroll = self.max_scroll(s, c.height() as i32);
+        if max_scroll > 0.0 {
+            let track = c.height() - hh - 8.0 * s;
+            let thumb = (track * c.height() / (self.content_h() * s)).max(20.0 * s);
+            let ty = hh + 4.0 * s + (track - thumb) * (self.scroll / max_scroll);
+            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, Rgba(255, 255, 255, 90));
+        }
+    }
+
+    fn render_field(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let (x, y, w, h) = Self::field_box().scaled(s);
+        let cy = y + h / 2.0;
+        let hover = matches!(self.hover, Some(SearchHit::Field | SearchHit::Clear));
+        c.rrect(x, y, w, h, 5.0 * s, if hover && !self.focused { BUTTON_HOVER } else { Rgba(8, 10, 18, 255) });
+        let border = if self.focused { ACCENT } else { BORDER };
+        c.stroke_rrect(x, y, w, h, 5.0 * s, if self.focused { 1.5 * s } else { 1.0 }, border);
+        // Magnifier: a ring and its handle.
+        let (mx, my, r) = (x + 13.0 * s, cy - 1.5 * s, 4.5 * s);
+        c.stroke_rrect(mx - r, my - r, 2.0 * r, 2.0 * r, r, 1.6 * s, DIM);
+        let (hx, hy, t) = (mx + r * 0.7, my + r * 0.7, 1.1 * s);
+        c.triangle([(hx - t, hy + t), (hx + t, hy - t), (hx + 4.0 * s, hy + 4.0 * s)], DIM);
+        c.triangle([(hx - t, hy + t), (hx + 4.0 * s, hy + 4.0 * s), (hx + 4.0 * s - t, hy + 4.0 * s + t)], DIM);
+        let tx = x + 26.0 * s;
+        let room = w - 26.0 * s - if self.query.is_empty() { 8.0 * s } else { Self::CLEAR_W * s };
+        let px = 12.5 * s;
+        if self.query.is_empty() {
+            let hint = if self.focused { "Type a card name…" } else { "Click to search cards" };
+            ctx.label(c, hint, tx, cy, 12.0, Weight::Medium, DIM.alpha(200), Align::Left);
+        } else {
+            // Keep the end of a long query, where the caret is.
+            let mut shown = self.query.clone();
+            while ctx.fonts.measure(&shown, px, Weight::Medium) > room - 4.0 * s && !shown.is_empty() {
+                shown.remove(0);
+            }
+            let text = if shown.len() < self.query.len() { format!("…{shown}") } else { shown };
+            let tw = ctx.fonts.measure(&text, px, Weight::Medium);
+            ctx.label(c, &text, tx, cy, 12.5, Weight::Medium, TEXT, Align::Left);
+            if self.focused {
+                c.rect(tx + tw + 1.5 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, TEXT);
+            }
+            let cx = x + w - Self::CLEAR_W * s / 2.0;
+            if self.hover == Some(SearchHit::Clear) {
+                c.circle(cx, cy, 8.5 * s, Rgba(255, 255, 255, 50));
+            }
+            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, TEXT, Align::Center);
+            return;
+        }
+        if self.focused {
+            c.rect(tx - 1.0 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, TEXT);
+        }
+    }
+
+    fn render_chips(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        for (i, k) in Self::chips().enumerate() {
+            let (cx, cy, cw, ch) = Self::chip_box(i).scaled(s);
+            let selected = k == self.category;
+            let hover = self.hover == Some(SearchHit::Category(k));
+            let fill = if selected {
+                ACCENT
+            } else if hover {
+                BUTTON_HOVER
+            } else {
+                BUTTON
+            };
+            c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
+            let label = k.map(Category::label).unwrap_or("All");
+            let color = if selected || hover { TEXT } else { Rgba(200, 208, 228, 255) };
+            ctx.label(c, label, cx + cw / 2.0, cy + ch / 2.0, 10.0, Weight::Bold, color, Align::Center);
+        }
+    }
+
+    fn render_rows(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let x = Self::PAD * s;
+        let iw = c.width() - 2.0 * Self::PAD * s;
+        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
+        let top = Self::header_h() * s - self.scroll;
+        if self.rows.is_empty() {
+            let note = ctx.fonts.fit(&self.note, 11.5 * s, Weight::Medium, iw - 16.0 * s);
+            ctx.label(c, &note, c.width() / 2.0, top + Self::ROW * s / 2.0, 11.5, Weight::Medium, DIM, Align::Center);
+            return;
+        }
+        let rh = Self::ROW * s;
+        for (i, row) in self.rows.iter().enumerate() {
+            let y = top + i as f32 * rh;
+            if y + rh <= 0.0 || y >= c.height() {
+                continue;
+            }
+            let (ry, h) = (y + 1.0 * s, rh - 1.0 * s);
+            let cy = ry + h / 2.0;
+            ctx.tile_row(c, &row.card_id, x, ry, iw, h, base);
+            c.rect(x, ry, 4.0 * s, h, row.color);
+            if self.hover == Some(SearchHit::Row(i)) {
+                c.rect(x, ry, iw, h, Rgba(255, 255, 255, 28));
+                c.rect(x, ry, 3.0 * s, h, GOLD);
+            }
+            let max = iw - if row.tier > 0 { 40.0 * s } else { 18.0 * s };
+            let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Bold, max);
+            ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, TEXT);
+            let detail = ctx.fonts.fit(&row.detail, 10.0 * s, Weight::Medium, max);
+            ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, Rgba(180, 190, 215, 255));
+            if row.tier > 0 {
+                let tx = x + iw - 14.0 * s;
+                c.circle(tx, cy, 9.5 * s, Rgba(0, 0, 0, 170));
+                c.circle(tx, cy, 8.5 * s, ACCENT);
+                ctx.label(c, &row.tier.to_string(), tx, cy, 11.0, Weight::Bold, TEXT, Align::Center);
+            }
+        }
+        if self.more > 0 {
+            let y = top + self.rows.len() as f32 * rh + Self::FOOT * s / 2.0;
+            let msg = format!("+{} more · keep typing to narrow down", self.more);
+            let msg = ctx.fonts.fit(&msg, 10.5 * s, Weight::Medium, iw - 16.0 * s);
+            ctx.label(c, &msg, c.width() / 2.0, y, 10.5, Weight::Medium, DIM, Align::Center);
         }
     }
 }

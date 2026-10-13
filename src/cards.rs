@@ -130,6 +130,43 @@ pub const KEYWORDS: &[Keyword] = &[
     Keyword { label: "Blood Gem", tags: &["BACON_BLOOD_GEM_TOOLTIP"], text: Some("blood gem") },
 ];
 
+/// What the card search can be narrowed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Category {
+    Minion,
+    Spell,
+    Hero,
+    Trinket,
+    Anomaly,
+    Reward,
+}
+
+impl Category {
+    pub const ALL: [Category; 6] =
+        [Category::Minion, Category::Spell, Category::Hero, Category::Trinket, Category::Anomaly, Category::Reward];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Category::Minion => "Minion",
+            Category::Spell => "Spell",
+            Category::Hero => "Hero",
+            Category::Trinket => "Trinket",
+            Category::Anomaly => "Anomaly",
+            Category::Reward => "Reward",
+        }
+    }
+    /// Lower-case count noun: "1 hero", "3 anomalies".
+    pub fn count(self, n: usize) -> String {
+        let noun = match (self, n == 1) {
+            (Category::Hero, false) => "heroes",
+            (Category::Anomaly, false) => "anomalies",
+            (k, true) => return format!("{n} {}", k.label().to_lowercase()),
+            (k, false) => return format!("{n} {}s", k.label().to_lowercase()),
+        };
+        format!("{n} {noun}")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     Minion,
@@ -153,6 +190,8 @@ pub struct Card {
     pub duos_only: bool,
     /// Bit `i` set when the card matches `KEYWORDS[i]`.
     pub keywords: u32,
+    /// Battlegrounds card the search can find.
+    pub category: Option<Category>,
 }
 
 impl Card {
@@ -182,6 +221,23 @@ struct RawCard {
     referenced_tags: Vec<String>,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    battlegrounds_hero: bool,
+}
+
+/// Search category of a raw card: tavern cards, playable heroes, and the
+/// pieces of the current season's modes.
+fn category(r: &RawCard) -> Option<Category> {
+    let tavern = r.is_bacon_pool && r.tech_level.is_some_and(|t| (1..=7).contains(&t));
+    Some(match r.kind.as_str() {
+        "Minion" if tavern => Category::Minion,
+        "Battleground_spell" if tavern => Category::Spell,
+        "Hero" if r.battlegrounds_hero => Category::Hero,
+        "Battleground_trinket" if r.is_bacon_pool => Category::Trinket,
+        "Battleground_anomaly" => Category::Anomaly,
+        "Battleground_quest_reward" => Category::Reward,
+        _ => return None,
+    })
 }
 
 fn keyword_bits(r: &RawCard) -> u32 {
@@ -202,6 +258,8 @@ pub struct CardDb {
     dbf: HashMap<i32, String>,
     /// Ids of tavern minions and spells (any mode), for the tier browser.
     pool: Vec<String>,
+    /// Ids the card search looks through, one per category and name.
+    searchable: Vec<String>,
     path: PathBuf,
 }
 
@@ -275,6 +333,7 @@ impl CardDb {
                     pool: r.is_bacon_pool,
                     timewarped: has("BACON_TIMEWARPED"),
                     keywords: keyword_bits(&r),
+                    category: category(&r),
                     solo_only: has("BG_SOLO_EXCLUSIVE"),
                     duos_only: has("BG_DUO_EXCLUSIVE"),
                     name: r.name,
@@ -290,7 +349,13 @@ impl CardDb {
             .map(|c| c.id.clone())
             .collect();
         pool.sort();
-        Ok(CardDb { cards, dbf, pool, path: path.to_path_buf() })
+        // Anomalies and rewards come in look-alike copies; keep the first id
+        // of each name.
+        let mut searchable: Vec<&Card> = cards.values().filter(|c| c.category.is_some() && !c.name.is_empty()).collect();
+        searchable.sort_by(|a, b| (a.category, &a.name, &a.id).cmp(&(b.category, &b.name, &b.id)));
+        searchable.dedup_by(|a, b| a.category == b.category && a.name == b.name);
+        let searchable = searchable.into_iter().map(|c| c.id.clone()).collect();
+        Ok(CardDb { cards, dbf, pool, searchable, path: path.to_path_buf() })
     }
 
     pub fn path(&self) -> &Path {
@@ -358,6 +423,23 @@ impl CardDb {
         groups
     }
 
+    /// Cards matching a typed name, best first. An empty query lists the
+    /// whole category by tier.
+    pub fn search(&self, query: &str, category: Option<Category>) -> Vec<&Card> {
+        let query = crate::search::Query::new(query);
+        let mut hits: Vec<(i32, &Card)> = self
+            .searchable
+            .iter()
+            .filter_map(|id| self.cards.get(id))
+            .filter(|c| category.is_none_or(|k| c.category == Some(k)))
+            .filter_map(|c| Some((query.score(&c.name)?, c)))
+            .collect();
+        hits.sort_by(|(sa, a), (sb, b)| {
+            sb.cmp(sa).then_with(|| (a.category, a.tier, &a.name).cmp(&(b.category, b.tier, &b.name)))
+        });
+        hits.into_iter().map(|(_, c)| c).collect()
+    }
+
     pub fn tier_spells(&self, tier: i32, duos: bool) -> Vec<&Card> {
         let mut spells: Vec<&Card> = self.pool_cards(Kind::TavernSpell, tier, duos).collect();
         spells.sort_by(|a, b| a.cost.cmp(&b.cost).then_with(|| a.name.cmp(&b.name)));
@@ -399,6 +481,24 @@ mod tests {
         assert!(db.get("K2").unwrap().has_keyword(dr));
         assert!(db.get("K3").unwrap().has_keyword(soc));
         assert!(!db.get("K4").unwrap().has_keyword(dr));
+    }
+
+    #[test]
+    fn search_by_category_and_name() {
+        let json = r#"[
+            {"id":"B1","name":"Bat","type":"Minion","races":["BEAST"],"techLevel":1,"isBaconPool":true},
+            {"id":"X1","name":"Battle Token","type":"Minion","techLevel":1},
+            {"id":"H1","name":"Batlord","type":"Hero","battlegroundsHero":true},
+            {"id":"H2","name":"Batlord Skin","type":"Hero"},
+            {"id":"R1","name":"Bat Cave","type":"Battleground_quest_reward"},
+            {"id":"R2","name":"Bat Cave","type":"Battleground_quest_reward"},
+            {"id":"T1","name":"Bat Charm","type":"Battleground_trinket","isBaconPool":true}
+        ]"#;
+        let db = CardDb::parse(json.as_bytes(), Path::new("test")).unwrap();
+        let ids = |q: &str, k: Option<Category>| db.search(q, k).iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids("bat", None), ["B1", "H1", "T1", "R1"]);
+        assert_eq!(ids("btlord", Some(Category::Hero)), ["H1"]);
+        assert_eq!(ids("", Some(Category::Reward)), ["R1"]);
     }
 
     #[test]

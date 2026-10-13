@@ -26,6 +26,8 @@ pub struct Config {
     pub show_opponent_boards: bool,
     /// "Comps" button: HSReplay's meta tier list and comp guides.
     pub show_comps: bool,
+    /// "Search" button: find any Battlegrounds card by name.
+    pub show_search: bool,
     /// Tier list starts with only the lobby's tribes (toggle in its header).
     pub hide_unavailable_tribes: bool,
     /// Read the lobby tribes from the game's memory (known from the hero
@@ -51,7 +53,7 @@ pub struct LeaderboardGeometry {
 
 impl Default for LeaderboardGeometry {
     fn default() -> Self {
-        LeaderboardGeometry { center_x: -0.697, top: 0.178, spacing: 0.098, width: 0.09, height: 0.088 }
+        LeaderboardGeometry { center_x: -0.62, top: 0.157, spacing: 0.0865, width: 0.085, height: 0.083 }
     }
 }
 
@@ -69,6 +71,7 @@ impl Default for Config {
             show_session: true,
             show_opponent_boards: true,
             show_comps: true,
+            show_search: true,
             hide_unavailable_tribes: true,
             read_game_memory: true,
             leaderboard: LeaderboardGeometry::default(),

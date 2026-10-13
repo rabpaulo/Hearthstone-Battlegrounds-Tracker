@@ -23,6 +23,9 @@ show_session = true
 show_opponent_boards = true
 # "Comps" button: HSReplay's meta comp tier list and guides.
 show_comps = true
+# "Search" button: fuzzy search for any minion, spell, hero, trinket, anomaly
+# or quest reward by name.
+show_search = true
 
 # Tier list starts showing only the lobby's tribes ("Lobby only" toggle).
 hide_unavailable_tribes = true
@@ -35,8 +38,8 @@ read_game_memory = true
 # Leaderboard hover areas, as fractions of the game window height.
 # Run `hsbg-overlay --calibrate` to see them and adjust.
 [leaderboard]
-center_x = -0.697   # portrait column centre, relative to the window centre
-top = 0.178         # top of the first portrait
-spacing = 0.098     # distance between portraits
-width = 0.09
-height = 0.088
+center_x = -0.62    # portrait column centre, relative to the window centre
+top = 0.157         # top of the first portrait
+spacing = 0.0865    # distance between portraits
+width = 0.085
+height = 0.083
