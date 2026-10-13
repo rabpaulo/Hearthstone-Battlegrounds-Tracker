@@ -1,5 +1,6 @@
 //! The overlay application: log → game state → panel models → X11 windows.
 
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -51,8 +52,14 @@ pub struct UiState {
     pub scroll: f32,
     /// Element of the tier list under the pointer.
     pub list_hover: Option<TierHit>,
-    /// Leaderboard slot (0 = first place) under the pointer.
+    /// Leaderboard slot (0 = first place) under the pointer, or whose
+    /// popup the pointer is on.
     pub slot_hover: Option<usize>,
+    /// Turn chip of the opponent popup under the pointer.
+    pub popup_hover: Option<usize>,
+    /// Turns per lobby id whose board is toggled away from the default
+    /// (only the newest one shown).
+    pub board_flips: HashMap<i32, HashSet<i32>>,
     pub comps_open: bool,
     /// Comp whose guide is shown instead of the tier list.
     pub comp_id: Option<i32>,
@@ -238,9 +245,12 @@ impl Layout {
         self.hs.h - 2 * self.px(8.0)
     }
 
-    pub fn popup(&self, slot: usize, size: (i32, i32)) -> Rect {
+    /// Right of the slot, centred on it; `keep_y` keeps a popup that is
+    /// already open from jumping when its toggled boards change.
+    pub fn popup(&self, slot: usize, size: (i32, i32), keep_y: Option<i32>) -> Rect {
         let r = self.slot(slot);
-        let y = (r.y + r.h / 2 - size.1 / 2)
+        let y = keep_y
+            .unwrap_or(r.y + r.h / 2 - size.1 / 2)
             .clamp(self.hs.y + self.px(8.0), (self.hs.y + self.hs.h - size.1 - self.px(8.0)).max(self.hs.y));
         Rect::new(r.x + r.w + self.px(12.0), y, size.0, size.1)
     }
@@ -371,6 +381,7 @@ impl Overlay {
                     self.ui.comp_id = None;
                     self.ui.search_open = false;
                     self.ui.search_focus = false;
+                    self.ui.board_flips.clear();
                     self.last_combat = None;
                     self.comps.refresh();
                 }
@@ -731,7 +742,8 @@ impl Overlay {
         if entry.is_local {
             return None;
         }
-        let boards = self
+        let flips = self.ui.board_flips.get(&entry.lobby_id);
+        let boards: Vec<BoardView> = self
             .game
             .seen_boards(entry.lobby_id)
             .iter()
@@ -754,14 +766,18 @@ impl Overlay {
                     .collect(),
             })
             .collect();
+        let shown = boards.iter().enumerate().map(|(i, b)| (i == 0) != flips.is_some_and(|f| f.contains(&b.turn))).collect();
         Some(OpponentPopup {
+            lobby_id: entry.lobby_id,
             hero: self.db.name(&entry.hero_card_id).to_string(),
             hero_card_id: entry.hero_card_id.clone(),
             place: entry.place,
             health: entry.health + entry.armor,
             turn: self.game.turn(),
             boards,
+            shown,
             hidden: 0,
+            hover: self.ui.popup_hover,
             images_rev: self.images.revision(),
         })
     }
@@ -929,7 +945,7 @@ impl App {
             comps: Panel::new(&x, "hsbg-comps", true)?,
             search: Panel::new(&x, "hsbg-search", true)?,
             preview: Panel::new(&x, "hsbg-preview", false)?,
-            popup: Panel::new(&x, "hsbg-opponent", false)?,
+            popup: Panel::new(&x, "hsbg-opponent", true)?,
             calib: Panel::new(&x, "hsbg-calibration", false)?,
         };
         let lobby_reader = ov.cfg.read_game_memory.then(crate::memory::spawn_reader);
@@ -1225,6 +1241,20 @@ impl App {
                     }
                 }
                 Event::MappingNotify(_) => self.x.reload_keymap(),
+                Event::ButtonPress(e) if e.event == self.panels.popup.win.id && e.detail == 1 => {
+                    let model = self.panels.popup.model();
+                    let hit = model.and_then(|m| Some((m.lobby_id, m.boards.get(m.hit(e.event_x as f32, e.event_y as f32, s)?)?.turn)));
+                    if let Some((lobby_id, turn)) = hit {
+                        let flips = self.ov.ui.board_flips.entry(lobby_id).or_default();
+                        if !flips.remove(&turn) {
+                            flips.insert(turn);
+                        }
+                    }
+                }
+                Event::MotionNotify(e) if e.event == self.panels.popup.win.id => {
+                    self.ov.ui.popup_hover = self.panels.popup.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                }
+                Event::LeaveNotify(e) if e.event == self.panels.popup.win.id => self.ov.ui.popup_hover = None,
                 Event::ButtonPress(e) if e.event == self.panels.tiers.win.id && (e.detail == 4 || e.detail == 5) => {
                     let step = 27.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
                     if let Some(m) = self.panels.tiers.model() {
@@ -1298,7 +1328,7 @@ impl App {
             (Some(l), true) => self.x.pointer().map(|p| (l, p)),
             _ => None,
         };
-        let hover = pointer.and_then(|(l, (px, py, _))| l.slot_at(px, py));
+        let hover = pointer.and_then(|(l, (px, py, _))| l.slot_at(px, py).or_else(|| self.popup_held(&l, px, py)));
         // A click outside the overlay gives the keyboard back to the game
         // (clicks on the panels arrive as events).
         if let Some((_, (px, py, true))) = pointer {
@@ -1310,8 +1340,22 @@ impl App {
         }
         if hover != self.ov.ui.slot_hover {
             self.ov.ui.slot_hover = hover;
+            self.ov.ui.popup_hover = None;
             self.dirty = true;
         }
+    }
+
+    /// The open popup's slot while the pointer is on the popup or crossing
+    /// the gap to it, so its turn chips can be clicked.
+    fn popup_held(&self, l: &Layout, px: i32, py: i32) -> Option<usize> {
+        let slot = self.ov.ui.slot_hover?;
+        let win = &self.panels.popup.win;
+        if !win.mapped {
+            return None;
+        }
+        let r = l.slot(slot);
+        let gap = Rect::new(r.x + r.w, r.y, win.rect.x - (r.x + r.w), r.h);
+        (win.rect.contains(px, py) || gap.contains(px, py)).then_some(slot)
     }
 
     /// Grabs the keyboard while the search field is focused and on screen,
@@ -1457,7 +1501,8 @@ impl App {
         match popup {
             Some((slot, mut pm)) if in_game && cfg.show_opponent_boards => {
                 pm.fit(s, layout.popup_max_h());
-                let rect = layout.popup(slot, pm.size(s));
+                let same = p.popup.win.mapped && p.popup.model().is_some_and(|m| m.place == pm.place);
+                let rect = layout.popup(slot, pm.size(s), same.then_some(p.popup.win.rect.y));
                 p.popup.update(x, rect, &pm, &mut ctx, |m, c, ctx| m.render(c, ctx));
             }
             _ => p.popup.hide(x),
@@ -1534,7 +1579,14 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         .into_iter()
         .filter(|p| !p.is_local && ov.game.seen_board(p.lobby_id).is_some())
         .max_by_key(|p| ov.game.seen_boards(p.lobby_id).len());
-    ov.ui.slot_hover = opponent.map(|p| (p.place - 1) as usize);
+    ov.ui.slot_hover = opponent.as_ref().map(|p| (p.place - 1) as usize);
+    // The two newest boards toggled on, to show the chips and the stack.
+    if let Some(p) = &opponent {
+        let seen = ov.game.seen_boards(p.lobby_id);
+        if let Some(b) = seen.len().checked_sub(2).map(|i| &seen[i]) {
+            ov.ui.board_flips.entry(p.lobby_id).or_default().insert(b.turn);
+        }
+    }
 
     let hs = Rect::new(0, 0, 1920, 1080);
     let layout = Layout::new(hs, &ov.cfg);
@@ -1556,7 +1608,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         }
         if let Some(p) = &popup {
             ids.push((ImageKind::Tile, p.hero_card_id.clone()));
-            ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Tile, m.card_id.clone())));
+            ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Portrait, m.card_id.clone())));
         }
         for (kind, id) in &ids {
             if ov.images.get(*kind, id).is_none() {
@@ -1675,7 +1727,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     }
     if let (Some(mut p), Some(slot)) = (popup, ov.ui.slot_hover) {
         p.fit(s, layout.popup_max_h());
-        emit(sc, &mut ctx, out, "popup", layout.popup(slot, p.size(s)), &|c, ctx| p.render(c, ctx))?;
+        emit(sc, &mut ctx, out, "popup", layout.popup(slot, p.size(s), None), &|c, ctx| p.render(c, ctx))?;
     }
     screen.pixmap.save_png(out.join("screen.png"))?;
     Ok(())

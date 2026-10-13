@@ -2,7 +2,8 @@
 //! and cached on disk.
 //!
 //! - tiles: 256×59 strips used for list rows,
-//! - renders: full Battlegrounds card images used for the hover preview.
+//! - renders: full Battlegrounds card images used for the hover preview,
+//! - portraits: the art inside a render's oval, for board views.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ use crate::{net, paths};
 pub enum ImageKind {
     Tile,
     Render,
+    /// Cropped from the render, so it shares its file.
+    Portrait,
 }
 
 impl ImageKind {
@@ -25,7 +28,7 @@ impl ImageKind {
     fn urls(self, card_id: &str) -> Vec<String> {
         match self {
             ImageKind::Tile => vec![format!("https://art.hearthstonejson.com/v1/tiles/{card_id}.png")],
-            ImageKind::Render => {
+            ImageKind::Render | ImageKind::Portrait => {
                 let bgs = format!("https://art.hearthstonejson.com/v1/bgs/latest/enUS/256x/{card_id}.png");
                 let regular = format!("https://art.hearthstonejson.com/v1/render/latest/enUS/256x/{card_id}.png");
                 // Skip the round trip that is known to fail.
@@ -37,7 +40,7 @@ impl ImageKind {
     fn dir(self) -> &'static str {
         match self {
             ImageKind::Tile => "tiles",
-            ImageKind::Render => "renders",
+            ImageKind::Render | ImageKind::Portrait => "renders",
         }
     }
 }
@@ -215,9 +218,18 @@ fn load(key: &Key) -> Option<Pixmap> {
         ImageKind::Tile if img.width() > TILE_ART_X * 2 => {
             img.clone_rect(tiny_skia::IntRect::from_xywh(TILE_ART_X as i32, 0, img.width() - TILE_ART_X, img.height())?)
         }
+        ImageKind::Portrait => {
+            let (x, y, w, h) = PORTRAIT;
+            let k = img.width() as f32 / 256.0;
+            let r = |v: f32| (v * k).round() as i32;
+            img.clone_rect(tiny_skia::IntRect::from_xywh(r(x), r(y), r(w) as u32, r(h) as u32)?)
+        }
         _ => Some(img),
     }
 }
+
+/// Art inside the portrait oval of a 256-wide minion render: x, y, w, h.
+const PORTRAIT: (f32, f32, f32, f32) = (78.0, 26.0, 100.0, 142.0);
 
 /// First column of actual art in a 256-wide tile.
 const TILE_ART_X: u32 = 80;
