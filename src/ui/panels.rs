@@ -1336,51 +1336,93 @@ pub struct BoardView {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpponentPopup {
+    pub lobby_id: i32,
     pub hero: String,
     pub hero_card_id: String,
     pub place: i32,
     pub health: i32,
     pub turn: i32,
-    /// Newest first.
+    /// Every board faced, newest first; one toggle chip each.
     pub boards: Vec<BoardView>,
-    /// Older boards left out because they did not fit.
+    /// Which of `boards` are toggled on.
+    pub shown: Vec<bool>,
+    /// Oldest toggled-on boards left out because they did not fit.
     pub hidden: usize,
+    /// Chip under the pointer.
+    pub hover: Option<usize>,
     pub images_rev: u64,
 }
 
 impl OpponentPopup {
-    const W: f32 = 300.0;
+    const W: f32 = Self::PAD * 2.0 + Self::SLOTS as f32 * Self::MINION_W + (Self::SLOTS - 1) as f32 * Self::MINION_GAP;
     const HEAD: f32 = 52.0;
+    const CHIP_COLS: usize = 10;
+    const CHIP_H: f32 = 20.0;
+    const GAP: f32 = 4.0;
     const BOARD_HEAD: f32 = 22.0;
+    /// A board laid out like in game: up to seven minions side by side.
+    const SLOTS: usize = 7;
+    const MINION_W: f32 = 64.0;
+    const MINION_GAP: f32 = 6.0;
+    const PORTRAIT_H: f32 = 82.0;
+    /// Portrait, the stat gems hanging below it and a two-line name.
+    const MINIONS_H: f32 = 8.0 + Self::PORTRAIT_H + 8.0 + 24.0;
     const ROW: f32 = 32.0;
     const MORE: f32 = 20.0;
     const PAD: f32 = 6.0;
 
+    fn chips_h(&self) -> f32 {
+        if self.boards.is_empty() {
+            return 0.0;
+        }
+        self.boards.len().div_ceil(Self::CHIP_COLS) as f32 * (Self::CHIP_H + Self::GAP) + Self::GAP
+    }
+
+    fn chip_box(i: usize) -> Box2 {
+        let inner = Self::W - 2.0 * Self::PAD;
+        let cw = (inner - Self::GAP * (Self::CHIP_COLS - 1) as f32) / Self::CHIP_COLS as f32;
+        let (col, row) = (i % Self::CHIP_COLS, i / Self::CHIP_COLS);
+        Box2 {
+            x: Self::PAD + col as f32 * (cw + Self::GAP),
+            y: Self::HEAD + row as f32 * (Self::CHIP_H + Self::GAP),
+            w: cw,
+            h: Self::CHIP_H,
+        }
+    }
+
+    /// Toggled-on boards that fit, newest first.
+    fn visible(&self) -> impl Iterator<Item = (usize, &BoardView)> {
+        let on = self.shown.iter().filter(|s| **s).count();
+        self.boards.iter().enumerate().filter(|(i, _)| self.shown[*i]).take(on.saturating_sub(self.hidden))
+    }
+
     fn board_h(b: &BoardView) -> f32 {
-        Self::BOARD_HEAD + b.minions.len().max(1) as f32 * Self::ROW
+        Self::BOARD_HEAD + if b.minions.is_empty() { Self::ROW } else { Self::MINIONS_H }
     }
 
     fn content_h(&self) -> f32 {
-        let boards = if self.boards.is_empty() {
-            Self::ROW
-        } else {
-            self.boards.iter().map(Self::board_h).sum::<f32>()
-        };
+        let boards = self.visible().map(|(_, b)| Self::board_h(b)).sum::<f32>();
+        // Nothing toggled on: room for the hint.
+        let boards = if boards > 0.0 { boards } else { Self::ROW };
         let more = if self.hidden > 0 { Self::MORE } else { 0.0 };
-        Self::HEAD + boards + more + Self::PAD
+        Self::HEAD + self.chips_h() + boards + more + Self::PAD
     }
 
-    /// Drops the oldest boards until the popup fits in `max_h` pixels,
-    /// always keeping the newest one.
+    /// Leaves out the oldest toggled-on boards until the popup fits in
+    /// `max_h` pixels, always keeping the newest one.
     pub fn fit(&mut self, s: f32, max_h: i32) {
-        while self.boards.len() > 1 && s_ceil(self.content_h(), s) > max_h {
-            self.boards.pop();
+        while self.visible().count() > 1 && s_ceil(self.content_h(), s) > max_h {
             self.hidden += 1;
         }
     }
 
     pub fn size(&self, s: f32) -> (i32, i32) {
         (s_ceil(Self::W, s), s_ceil(self.content_h(), s))
+    }
+
+    /// Turn chip at a point.
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<usize> {
+        (0..self.boards.len()).find(|&i| Self::chip_box(i).contains(x / s, y / s))
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1394,7 +1436,7 @@ impl OpponentPopup {
         ctx.tile_row(c, &self.hero_card_id, x, x, iw, hh, HEADER);
         let name = ctx.fonts.fit(&self.hero, 14.0 * s, Weight::Bold, iw - 20.0 * s);
         ctx.label_shadow(c, &name, x + 10.0 * s, x + 15.0 * s, 14.0, Weight::Bold, TEXT);
-        let faced = self.boards.len() + self.hidden;
+        let faced = self.boards.len();
         let sub = match self.boards.first() {
             Some(b) => format!("Tier {} · faced {faced} time{}", b.tier, if faced == 1 { "" } else { "s" }),
             None => "Not faced yet".to_string(),
@@ -1406,12 +1448,43 @@ impl OpponentPopup {
             ctx.label(c, "No board seen yet", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
             return;
         }
-        for (i, b) in self.boards.iter().enumerate() {
+        self.render_chips(c, ctx);
+        y += self.chips_h() * s;
+        let mut any = false;
+        for (i, b) in self.visible() {
             y = self.render_board(c, ctx, b, i == 0, y);
+            any = true;
+        }
+        if !any {
+            ctx.label(c, "Click a turn to show its board", w / 2.0, y + Self::ROW * s / 2.0, 11.5, Weight::Medium, DIM, Align::Center);
         }
         if self.hidden > 0 {
-            let msg = format!("+{} older board{}", self.hidden, if self.hidden == 1 { "" } else { "s" });
+            let msg = format!("+{} older board{} not shown", self.hidden, if self.hidden == 1 { "" } else { "s" });
             ctx.label(c, &msg, w / 2.0, y + Self::MORE * s / 2.0, 10.5, Weight::Medium, DIM, Align::Center);
+        }
+    }
+
+    fn render_chips(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        for (i, b) in self.boards.iter().enumerate() {
+            let (cx, cy, cw, ch) = Self::chip_box(i).scaled(s);
+            let on = self.shown[i];
+            let hover = self.hover == Some(i);
+            let fill = match (on, hover) {
+                (true, _) => ACCENT,
+                (false, true) => BUTTON_HOVER,
+                (false, false) => BUTTON,
+            };
+            c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
+            if hover && on {
+                c.rrect(cx, cy, cw, ch, 4.0 * s, Rgba(255, 255, 255, 30));
+            }
+            // The latest board gets the same gold mark as its header.
+            if i == 0 {
+                c.rect(cx + 3.0 * s, cy + ch - 3.0 * s, cw - 6.0 * s, 1.5 * s, GOLD);
+            }
+            let color = if on || hover { TEXT } else { Rgba(160, 170, 195, 255) };
+            ctx.label(c, &format!("T{}", b.turn), cx + cw / 2.0, cy + ch / 2.0, 10.5, Weight::Bold, color, Align::Center);
         }
     }
 
@@ -1439,32 +1512,84 @@ impl OpponentPopup {
             ctx.label(c, "Empty board", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
             return y + Self::ROW * s;
         }
-        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
-        for m in &b.minions {
-            let rh = Self::ROW * s;
-            ctx.tile_row(c, &m.card_id, x, y, iw, rh - 2.0 * s, base);
-            let cy = y + (rh - 2.0 * s) / 2.0;
-            // Attack / health gems.
-            let gw = 26.0 * s;
-            let gh = 20.0 * s;
-            c.rrect(x + 4.0 * s, cy - gh / 2.0, gw, gh, 4.0 * s, ATTACK);
-            ctx.label(c, &m.attack.to_string(), x + 4.0 * s + gw / 2.0, cy, 12.0, Weight::Bold, Rgba(30, 20, 0, 255), Align::Center);
-            c.rrect(x + 8.0 * s + gw, cy - gh / 2.0, gw, gh, 4.0 * s, HEALTH);
-            ctx.label(c, &m.health.to_string(), x + 8.0 * s + gw * 1.5, cy, 12.0, Weight::Bold, TEXT, Align::Center);
-            let tx = x + 14.0 * s + gw * 2.0;
-            let name_color = if m.golden { GOLD } else { TEXT };
-            let has_kw = !m.keywords.is_empty();
-            let name_cy = if has_kw { cy - 6.0 * s } else { cy };
-            let name = ctx.fonts.fit(&m.name, 12.0 * s, Weight::Bold, x + iw - tx - 6.0 * s);
-            ctx.label_shadow(c, &name, tx, name_cy, 12.0, Weight::Bold, name_color);
-            if has_kw {
-                let kw = m.keywords.join(" · ");
-                let kw = ctx.fonts.fit(&kw, 9.5 * s, Weight::Medium, x + iw - tx - 6.0 * s);
-                ctx.label_shadow(c, &kw, tx, cy + 7.0 * s, 9.5, Weight::Medium, Rgba(190, 200, 225, 255));
-            }
-            y += rh;
+        // Centred like the game centres a board that is not full.
+        let n = b.minions.len().min(Self::SLOTS) as f32;
+        let row_w = n * Self::MINION_W + (n - 1.0) * Self::MINION_GAP;
+        let x0 = (Self::W - row_w) / 2.0;
+        for (i, m) in b.minions.iter().take(Self::SLOTS).enumerate() {
+            let mx = (x0 + i as f32 * (Self::MINION_W + Self::MINION_GAP)) * s;
+            Self::render_minion(c, ctx, m, mx, y + 8.0 * s);
         }
-        y
+        y + Self::MINIONS_H * s
+    }
+
+    /// One minion as on the game board: portrait, attack bottom left,
+    /// health bottom right, keyword effects around it, name below.
+    fn render_minion(c: &mut Canvas, ctx: &mut Ctx, m: &MinionView, x: f32, y: f32) {
+        let s = ctx.s;
+        let (w, h) = (Self::MINION_W * s, Self::PORTRAIT_H * s);
+        let r = w / 2.0;
+        let has = |k: &str| m.keywords.contains(&k);
+        if has("Taunt") {
+            // Stone shield behind the portrait.
+            let (tx, ty, tw, th) = (x - 4.0 * s, y - 3.0 * s, w + 8.0 * s, h + 5.0 * s);
+            c.rrect(tx, ty, tw, th, 12.0 * s, Rgba(132, 136, 148, 255));
+            c.stroke_rrect(tx, ty, tw, th, 12.0 * s, 1.5 * s, Rgba(60, 62, 72, 255));
+        }
+        c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
+        if let Some(img) = ctx.images.get(ImageKind::Portrait, &m.card_id) {
+            c.image_cover(&img, x, y, w, h, r, 1.0);
+        } else if let Some(img) = ctx.images.get(ImageKind::Tile, &m.card_id) {
+            c.image_cover(&img, x, y, w, h, r, 1.0);
+        }
+        if has("Stealth") {
+            c.rrect(x, y, w, h, r, Rgba(20, 10, 40, 110));
+        }
+        if has("Reborn") {
+            c.rrect(x, y, w, h, r, Rgba(110, 220, 255, 60));
+        }
+        let frame = if m.golden { GOLD } else { Rgba(96, 84, 70, 255) };
+        c.stroke_rrect(x, y, w, h, r, 2.0 * s, frame);
+        if has("Shield") {
+            c.stroke_rrect(x - 2.5 * s, y - 2.5 * s, w + 5.0 * s, h + 5.0 * s, r + 2.5 * s, 3.0 * s, Rgba(255, 214, 90, 210));
+        }
+        // Small badges along the top for keywords without a look of their own.
+        let badges: Vec<(&str, Rgba)> = [
+            ("Venomous", "V", Rgba(70, 170, 60, 255)),
+            ("Windfury", "W", Rgba(70, 150, 220, 255)),
+            ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
+        ]
+        .into_iter()
+        .filter(|(k, ..)| has(k))
+        .map(|(_, l, col)| (l, col))
+        .collect();
+        let bw = 14.0 * s;
+        let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
+        for (i, (label, col)) in badges.iter().enumerate() {
+            let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * s);
+            c.circle(cx, cy, 6.5 * s, Rgba(0, 0, 0, 200));
+            c.circle(cx, cy, 5.5 * s, *col);
+            ctx.label(c, label, cx, cy, 8.0, Weight::Bold, TEXT, Align::Center);
+        }
+        // Stats where the game puts them.
+        let gy = y + h - 6.0 * s;
+        for (cx, value, color) in [(x + 9.0 * s, m.attack, ATTACK), (x + w - 9.0 * s, m.health, HEALTH)] {
+            c.circle(cx, gy, 11.5 * s, Rgba(0, 0, 0, 220));
+            c.circle(cx, gy, 10.0 * s, color);
+            let text = value.to_string();
+            let px = match text.len() {
+                1 | 2 => 12.5,
+                3 => 10.0,
+                _ => 8.5,
+            };
+            c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, TEXT, Align::Center);
+        }
+        let lines = ctx.fonts.wrap(&m.name, 9.5 * s, Weight::Bold, w + Self::MINION_GAP * s - 2.0 * s);
+        let name_color = if m.golden { GOLD } else { Rgba(220, 224, 236, 255) };
+        for (i, line) in lines.iter().take(2).enumerate() {
+            let cy = y + h + 15.0 * s + i as f32 * 11.0 * s;
+            ctx.label(c, line, x + w / 2.0, cy, 9.5, Weight::Bold, name_color, Align::Center);
+        }
     }
 }
 
@@ -1520,29 +1645,51 @@ impl Calibration {
 mod tests {
     use super::*;
 
-    #[test]
-    fn popup_drops_oldest_boards_to_fit() {
-        let minion = MinionView { card_id: "X".into(), name: "X".into(), attack: 1, health: 1, golden: false, keywords: vec![] };
-        let board = |turn| BoardView { turn, tier: 1, minions: vec![minion.clone(); 7] };
-        let mut p = OpponentPopup {
+    fn popup(boards: Vec<BoardView>, shown: Vec<bool>) -> OpponentPopup {
+        OpponentPopup {
+            lobby_id: 1,
             hero: "H".into(),
             hero_card_id: "H".into(),
             place: 1,
             health: 30,
             turn: 9,
-            boards: vec![board(9), board(6), board(3)],
+            boards,
+            shown,
             hidden: 0,
+            hover: None,
             images_rev: 0,
-        };
+        }
+    }
+
+    fn board(turn: i32) -> BoardView {
+        let minion = MinionView { card_id: "X".into(), name: "X".into(), attack: 1, health: 1, golden: false, keywords: vec![] };
+        BoardView { turn, tier: 1, minions: vec![minion; 7] }
+    }
+
+    #[test]
+    fn popup_drops_oldest_boards_to_fit() {
+        let mut p = popup(vec![board(9), board(6), board(3)], vec![true; 3]);
         let full = p.size(1.0).1;
         p.fit(1.0, full);
-        assert_eq!((p.boards.len(), p.hidden), (3, 0));
+        assert_eq!(p.hidden, 0);
         p.fit(1.0, full - 1);
-        assert_eq!(p.boards.iter().map(|b| b.turn).collect::<Vec<_>>(), [9, 6]);
+        assert_eq!(p.visible().map(|(_, b)| b.turn).collect::<Vec<_>>(), [9, 6]);
         assert_eq!(p.hidden, 1);
         assert!(p.size(1.0).1 < full);
         // The newest board stays even when it does not fit.
         p.fit(1.0, 10);
-        assert_eq!((p.boards.len(), p.hidden), (1, 2));
+        assert_eq!((p.visible().count(), p.hidden), (1, 2));
+    }
+
+    #[test]
+    fn popup_shows_only_toggled_boards() {
+        let p = popup(vec![board(9), board(6), board(3)], vec![false, false, true]);
+        assert_eq!(p.visible().map(|(i, b)| (i, b.turn)).collect::<Vec<_>>(), [(2, 3)]);
+        let (x, y, w, h) = OpponentPopup::chip_box(1).scaled(2.0);
+        assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(1));
+        assert_eq!(p.hit(1.0, 1.0, 2.0), None);
+        // Nothing toggled on: room for the hint.
+        let none = popup(vec![board(9)], vec![false]);
+        assert!(none.size(1.0).1 > 0);
     }
 }

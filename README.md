@@ -14,7 +14,7 @@ só para as tribos da lobby, um campo da memória do cliente.
 | Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
 | Tribos + partidas | esquerda | Tribos da lobby e as últimas partidas com colocação e média da sessão |
-| Tabuleiro do oponente | ao passar o mouse no leaderboard | Todos os tabuleiros vistos daquele jogador, do mais recente ao mais antigo (stats, palavras-chave, tier, há quantos turnos) |
+| Tabuleiro do oponente | ao passar o mouse no leaderboard | Um botão por turno em que você enfrentou o jogador; clique para mostrar ou esconder o tabuleiro daquele turno (o mais recente vem ligado). Cada tabuleiro aparece na horizontal como no jogo: retrato do lacaio com ataque embaixo à esquerda e vida embaixo à direita, taunt, escudo divino, dourado e outras palavras-chave marcados, além do tier e de há quantos turnos; o popup continua aberto com o mouse sobre ele |
 
 Não incluído: estatísticas exclusivas do HSReplay Premium (MMR e
 estatísticas de heróis/comps) e o MMR do jogador.
