@@ -165,6 +165,7 @@ impl Card {
 #[serde(rename_all = "camelCase")]
 struct RawCard {
     id: String,
+    dbf_id: Option<i32>,
     #[serde(default)]
     name: String,
     #[serde(default, rename = "type")]
@@ -197,6 +198,8 @@ fn keyword_bits(r: &RawCard) -> u32 {
 
 pub struct CardDb {
     cards: HashMap<String, Card>,
+    /// dbf id → card id (HSReplay refers to cards by dbf id).
+    dbf: HashMap<i32, String>,
     /// Ids of tavern minions and spells (any mode), for the tier browser.
     pool: Vec<String>,
     path: PathBuf,
@@ -254,6 +257,7 @@ impl CardDb {
 
     pub fn parse(bytes: &[u8], path: &Path) -> Result<CardDb> {
         let raw: Vec<RawCard> = serde_json::from_slice(bytes).context("parsing card database")?;
+        let dbf: HashMap<i32, String> = raw.iter().filter_map(|r| Some((r.dbf_id?, r.id.clone()))).collect();
         let cards: HashMap<String, Card> = raw
             .into_iter()
             .map(|r| {
@@ -286,7 +290,7 @@ impl CardDb {
             .map(|c| c.id.clone())
             .collect();
         pool.sort();
-        Ok(CardDb { cards, pool, path: path.to_path_buf() })
+        Ok(CardDb { cards, dbf, pool, path: path.to_path_buf() })
     }
 
     pub fn path(&self) -> &Path {
@@ -295,6 +299,10 @@ impl CardDb {
 
     pub fn get(&self, id: &str) -> Option<&Card> {
         self.cards.get(id)
+    }
+
+    pub fn by_dbf(&self, dbf: i32) -> Option<&Card> {
+        self.dbf.get(&dbf).and_then(|id| self.cards.get(id))
     }
 
     pub fn name<'a>(&'a self, id: &'a str) -> &'a str {

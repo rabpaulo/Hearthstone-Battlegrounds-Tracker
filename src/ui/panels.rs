@@ -106,38 +106,64 @@ fn s_ceil(v: f32, s: f32) -> i32 {
 
 // ---- top bar: turn counter and tavern tier buttons -----------------------
 
+/// What the pointer is over in the top bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopHit {
+    Tier(i32),
+    Comps,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopBar {
     pub turn: i32,
     pub tavern_tier: i32,
     pub max_tier: i32,
     pub selected: Option<i32>,
-    pub hover: Option<i32>,
+    pub hover: Option<TopHit>,
+    /// Show the comps button, and whether its panel is open.
+    pub comps: bool,
+    pub comps_open: bool,
 }
 
 impl TopBar {
     const H: f32 = 38.0;
     const TURN_W: f32 = 84.0;
+    const COMPS_W: f32 = 64.0;
     const BTN: f32 = 30.0;
     const GAP: f32 = 4.0;
     const PAD: f32 = 4.0;
 
+    fn comps_x() -> f32 {
+        Self::PAD + Self::TURN_W + Self::GAP * 2.0
+    }
+
+    fn tiers_x(&self) -> f32 {
+        Self::comps_x() + if self.comps { Self::COMPS_W + Self::GAP * 3.0 } else { 0.0 }
+    }
+
     pub fn size(&self, s: f32) -> (i32, i32) {
-        let w = Self::PAD * 2.0 + Self::TURN_W + Self::GAP * 2.0 + self.max_tier as f32 * (Self::BTN + Self::GAP)
-            - Self::GAP;
+        let w = match self.max_tier {
+            0 => Self::comps_x() + if self.comps { Self::COMPS_W + Self::PAD } else { 0.0 },
+            n => self.tiers_x() + n as f32 * (Self::BTN + Self::GAP) - Self::GAP + Self::PAD,
+        };
         (s_ceil(w, s), s_ceil(Self::H, s))
     }
 
-    fn button_x(tier: i32) -> f32 {
-        Self::PAD + Self::TURN_W + Self::GAP * 2.0 + (tier - 1) as f32 * (Self::BTN + Self::GAP)
+    fn button_x(&self, tier: i32) -> f32 {
+        self.tiers_x() + (tier - 1) as f32 * (Self::BTN + Self::GAP)
     }
 
-    pub fn hit(&self, x: f32, s: f32) -> Option<i32> {
+    pub fn hit(&self, x: f32, s: f32) -> Option<TopHit> {
         let x = x / s;
-        (1..=self.max_tier).find(|&t| {
-            let bx = Self::button_x(t);
-            x >= bx && x < bx + Self::BTN
-        })
+        if self.comps && x >= Self::comps_x() && x < Self::comps_x() + Self::COMPS_W {
+            return Some(TopHit::Comps);
+        }
+        (1..=self.max_tier)
+            .find(|&t| {
+                let bx = self.button_x(t);
+                x >= bx && x < bx + Self::BTN
+            })
+            .map(TopHit::Tier)
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -145,20 +171,28 @@ impl TopBar {
         ctx.panel(c);
         let label = if self.turn > 0 { format!("Turn {}", self.turn) } else { "Hero pick".to_string() };
         ctx.label(c, &label, (Self::PAD + Self::TURN_W / 2.0) * s, Self::H / 2.0 * s, 15.0, Weight::Bold, TEXT, Align::Center);
-        let sep_x = (Self::PAD + Self::TURN_W + Self::GAP) * s;
-        c.rect(sep_x, 7.0 * s, 1.0, (Self::H - 14.0) * s, BORDER);
+        let sep = |c: &mut Canvas, x: f32| c.rect(x * s, 7.0 * s, 1.0, (Self::H - 14.0) * s, BORDER);
+        sep(c, Self::PAD + Self::TURN_W + Self::GAP);
         let by = (Self::H - Self::BTN) / 2.0 * s;
         let b = Self::BTN * s;
+        let fill = |selected: bool, hover: bool| if selected {
+            ACCENT
+        } else if hover {
+            BUTTON_HOVER
+        } else {
+            BUTTON
+        };
+        if self.comps {
+            let (bx, bw) = (Self::comps_x() * s, Self::COMPS_W * s);
+            c.rrect(bx, by, bw, b, 5.0 * s, fill(self.comps_open, self.hover == Some(TopHit::Comps)));
+            ctx.label(c, "Comps", bx + bw / 2.0, by + b / 2.0, 13.0, Weight::Bold, TEXT, Align::Center);
+            if self.max_tier > 0 {
+                sep(c, Self::comps_x() + Self::COMPS_W + Self::GAP * 1.5);
+            }
+        }
         for t in 1..=self.max_tier {
-            let bx = Self::button_x(t) * s;
-            let fill = if self.selected == Some(t) {
-                ACCENT
-            } else if self.hover == Some(t) {
-                BUTTON_HOVER
-            } else {
-                BUTTON
-            };
-            c.rrect(bx, by, b, b, 5.0 * s, fill);
+            let bx = self.button_x(t) * s;
+            c.rrect(bx, by, b, b, 5.0 * s, fill(self.selected == Some(t), self.hover == Some(TopHit::Tier(t))));
             if t == self.tavern_tier {
                 c.stroke_rrect(bx, by, b, b, 5.0 * s, 2.0 * s, GOLD);
             }
@@ -500,6 +534,295 @@ impl TierList {
             let label = ctx.fonts.fit(label, px * s, Weight::Bold, cw - 6.0 * s);
             let color = if selected || hover { TEXT } else { Rgba(200, 208, 228, 255) };
             ctx.label(c, &label, cx + cw / 2.0, cy + ch / 2.0, px, Weight::Bold, color, Align::Center);
+        }
+    }
+}
+
+// ---- meta comps ----------------------------------------------------------
+
+pub fn comp_tier_color(letter: &str) -> Rgba {
+    Rgba::hex(match letter {
+        "S" => 0xe8603c,
+        "A" => 0xf0a030,
+        "B" => 0xd8c040,
+        "C" => 0x78b850,
+        _ => 0x5890c0,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompRow {
+    pub id: i32,
+    pub name: String,
+    /// Tribe and difficulty.
+    pub detail: String,
+    pub color: Rgba,
+    /// Card whose art stands for the comp.
+    pub card_id: String,
+    /// +1 moved up a tier since the last snapshot, -1 down.
+    pub trend: i32,
+    /// Tribe not in this lobby.
+    pub dim: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompItem {
+    /// Band opening a tier of the meta list.
+    Tier { letter: &'static str, count: usize },
+    Comp(CompRow),
+    Heading(&'static str),
+    /// One wrapped line of guide text.
+    Text { text: String, strong: bool },
+    Card { card_id: String, name: String, tier: i32 },
+    /// Loading, errors, nothing to show.
+    Note(String),
+    Gap,
+}
+
+impl CompItem {
+    fn height(&self) -> f32 {
+        match self {
+            CompItem::Tier { .. } => 26.0,
+            CompItem::Comp(_) => 36.0,
+            CompItem::Heading(_) => 24.0,
+            CompItem::Text { .. } => 16.0,
+            CompItem::Card { .. } => 27.0,
+            CompItem::Note(_) => 30.0,
+            CompItem::Gap => 6.0,
+        }
+    }
+
+    /// Reacts to the pointer (highlight, click or card preview).
+    pub fn hoverable(&self) -> bool {
+        matches!(self, CompItem::Comp(_) | CompItem::Card { .. })
+    }
+}
+
+/// What the pointer is over in the comps panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompHit {
+    LobbyToggle,
+    Back,
+    Item(usize),
+}
+
+/// Meta tier list of comps, or the guide of one comp.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompPanel {
+    pub title: String,
+    pub subtitle: String,
+    /// Showing one comp: the header has a back button and its tier badge.
+    pub detail: Option<&'static str>,
+    pub items: Vec<CompItem>,
+    pub scroll: f32,
+    pub hover: Option<CompHit>,
+    pub images_rev: u64,
+    pub hide_unavailable: bool,
+}
+
+impl CompPanel {
+    pub const W: f32 = 300.0;
+    /// Guide text size and the width it is wrapped to (unscaled).
+    pub const TEXT_PX: f32 = 11.5;
+    pub const TEXT_W: f32 = Self::W - 2.0 * Self::PAD - 24.0;
+    const TITLE: f32 = 46.0;
+    const PAD: f32 = 4.0;
+    const BACK: f32 = 30.0;
+
+    fn content_h(&self) -> f32 {
+        Self::TITLE + self.items.iter().map(CompItem::height).sum::<f32>() + Self::PAD
+    }
+
+    pub fn size(&self, s: f32, max_h: i32) -> (i32, i32) {
+        (s_ceil(Self::W, s), s_ceil(self.content_h(), s).min(max_h))
+    }
+
+    pub fn max_scroll(&self, s: f32, h: i32) -> f32 {
+        (self.content_h() * s - h as f32).max(0.0)
+    }
+
+    /// Item tops (unscaled, unscrolled).
+    fn tops(&self) -> impl Iterator<Item = (usize, &CompItem, f32)> {
+        let mut y = Self::TITLE;
+        self.items.iter().enumerate().map(move |(i, item)| {
+            let top = y;
+            y += item.height();
+            (i, item, top)
+        })
+    }
+
+    fn toggle_box() -> Box2 {
+        Box2 { x: Self::W - TierList::TOGGLE_W - 10.0, y: (Self::TITLE - TierList::TOGGLE_H) / 2.0, w: TierList::TOGGLE_W, h: TierList::TOGGLE_H }
+    }
+
+    fn back_box() -> Box2 {
+        Box2 { x: 8.0, y: (Self::TITLE - Self::BACK) / 2.0, w: Self::BACK, h: Self::BACK }
+    }
+
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<CompHit> {
+        let (ux, uy) = (x / s, y / s);
+        if uy < Self::TITLE {
+            return match self.detail {
+                Some(_) => Self::back_box().contains(ux, uy).then_some(CompHit::Back),
+                None => Self::toggle_box().contains(ux, uy).then_some(CompHit::LobbyToggle),
+            };
+        }
+        let cy = (y + self.scroll) / s;
+        self.tops().find(|(_, item, top)| cy >= *top && cy < top + item.height()).map(|(i, _, _)| CompHit::Item(i))
+    }
+
+    pub fn item(&self, i: usize) -> Option<&CompItem> {
+        self.items.get(i)
+    }
+
+    /// Window-local vertical centre of an item.
+    pub fn item_center(&self, i: usize, s: f32) -> Option<f32> {
+        self.tops().find(|(j, _, _)| *j == i).map(|(_, item, top)| (top + item.height() / 2.0) * s - self.scroll)
+    }
+
+    pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let w = c.width();
+        ctx.panel(c);
+        self.render_items(c, ctx);
+        // Header drawn last so scrolled items slide under it.
+        let hh = Self::TITLE * s;
+        if ctx.opaque {
+            c.rect(0.0, 0.0, w, hh, BG_OPAQUE);
+        } else {
+            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, BG_OPAQUE);
+            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, BG_OPAQUE);
+        }
+        self.render_header(c, ctx);
+        c.rect(0.0, hh - 1.0, w, 1.0, BORDER);
+        let max_scroll = self.max_scroll(s, c.height() as i32);
+        if max_scroll > 0.0 {
+            let track = c.height() - hh - 8.0 * s;
+            let thumb = (track * c.height() / (self.content_h() * s)).max(20.0 * s);
+            let ty = hh + 4.0 * s + (track - thumb) * (self.scroll / max_scroll);
+            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, Rgba(255, 255, 255, 90));
+        }
+    }
+
+    fn render_header(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        // Left edge of the title and right edge of the room it has.
+        let (tx, right) = match self.detail {
+            Some(letter) => {
+                let (bx, by, bw, bh) = Self::back_box().scaled(s);
+                c.rrect(bx, by, bw, bh, 5.0 * s, if self.hover == Some(CompHit::Back) { BUTTON_HOVER } else { BUTTON });
+                let (cx, cy, a) = (bx + bw / 2.0, by + bh / 2.0, 5.0 * s);
+                c.triangle([(cx + a * 0.6, cy - a), (cx + a * 0.6, cy + a), (cx - a * 0.7, cy)], TEXT);
+                let tx = bx + bw + 9.0 * s;
+                let b = 26.0 * s;
+                let bx = c.width() - b - 10.0 * s;
+                c.rrect(bx, (Self::TITLE * s - b) / 2.0, b, b, 5.0 * s, comp_tier_color(letter));
+                ctx.label(c, letter, bx + b / 2.0, Self::TITLE * s / 2.0, 15.0, Weight::Bold, Rgba(30, 20, 10, 255), Align::Center);
+                (tx, bx - 8.0 * s)
+            }
+            None => {
+                let (bx, by, bw, bh) = Self::toggle_box().scaled(s);
+                let hover = self.hover == Some(CompHit::LobbyToggle);
+                c.rrect(bx, by, bw, bh, 5.0 * s, if hover { BUTTON_HOVER } else { BUTTON });
+                let b = 12.0 * s;
+                let (cx, cy) = (bx + 7.0 * s, by + (bh - b) / 2.0);
+                if self.hide_unavailable {
+                    c.rrect(cx, cy, b, b, 3.0 * s, ACCENT);
+                    c.rrect(cx + 3.0 * s, cy + 3.0 * s, b - 6.0 * s, b - 6.0 * s, 1.5 * s, TEXT);
+                } else {
+                    c.stroke_rrect(cx, cy, b, b, 3.0 * s, 1.5 * s, DIM);
+                }
+                let color = if self.hide_unavailable { TEXT } else { DIM };
+                ctx.label(c, "Lobby only", cx + b + 6.0 * s, by + bh / 2.0, 10.5, Weight::Bold, color, Align::Left);
+                (12.0 * s, bx - 8.0 * s)
+            }
+        };
+        let title = ctx.fonts.fit(&self.title, 14.0 * s, Weight::Bold, right - tx);
+        ctx.label(c, &title, tx, 16.0 * s, 14.0, Weight::Bold, GOLD, Align::Left);
+        let subtitle = ctx.fonts.fit(&self.subtitle, 10.0 * s, Weight::Medium, right - tx);
+        ctx.label(c, &subtitle, tx, 33.0 * s, 10.0, Weight::Medium, DIM, Align::Left);
+    }
+
+    fn render_items(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let x = Self::PAD * s;
+        let iw = c.width() - 2.0 * Self::PAD * s;
+        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
+        for (i, item, top) in self.tops() {
+            let y = top * s - self.scroll;
+            let h = item.height() * s;
+            if y + h <= 0.0 || y >= c.height() {
+                continue;
+            }
+            let hover = self.hover == Some(CompHit::Item(i));
+            let cy = y + h / 2.0;
+            match item {
+                CompItem::Tier { letter, count } => {
+                    let color = comp_tier_color(letter);
+                    c.rect(x, y + 2.0 * s, iw, h - 2.0 * s, HEADER);
+                    let b = 18.0 * s;
+                    let cy = cy + 1.0 * s;
+                    c.rrect(x + 6.0 * s, cy - b / 2.0, b, b, 4.0 * s, color);
+                    ctx.label(c, letter, x + 6.0 * s + b / 2.0, cy, 12.0, Weight::Bold, Rgba(30, 20, 10, 255), Align::Center);
+                    ctx.label(c, &format!("{letter} tier"), x + 32.0 * s, cy, 12.5, Weight::Bold, TEXT, Align::Left);
+                    let n = format!("{count} comp{}", if *count == 1 { "" } else { "s" });
+                    let nw = ctx.fonts.measure(&n, 10.0 * s, Weight::Medium);
+                    ctx.label(c, &n, x + iw - nw - 10.0 * s, cy, 10.0, Weight::Medium, DIM, Align::Left);
+                }
+                CompItem::Comp(row) => {
+                    let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
+                    ctx.tile_row(c, &row.card_id, x, ry, iw, rh, base);
+                    if row.dim {
+                        c.rect(x, ry, iw, rh, base.alpha(130));
+                    }
+                    c.rect(x, ry, 4.0 * s, rh, if row.dim { row.color.alpha(110) } else { row.color });
+                    if hover {
+                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
+                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                    }
+                    let max = iw - 40.0 * s;
+                    let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Bold, max);
+                    ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, if row.dim { DIM } else { TEXT });
+                    let detail = ctx.fonts.fit(&row.detail, 10.0 * s, Weight::Medium, max);
+                    ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, Rgba(180, 190, 215, 255));
+                    if row.trend != 0 {
+                        let (ax, a) = (x + iw - 14.0 * s, 4.5 * s);
+                        c.circle(ax, cy, 8.5 * s, Rgba(0, 0, 0, 170));
+                        let (tip, foot, color) =
+                            if row.trend > 0 { (cy - a, cy + a * 0.8, WIN) } else { (cy + a, cy - a * 0.8, LOSS) };
+                        c.triangle([(ax - a, foot), (ax + a, foot), (ax, tip)], color);
+                    }
+                }
+                CompItem::Heading(text) => {
+                    ctx.label(c, text, x + 8.0 * s, cy + 3.0 * s, 10.0, Weight::Bold, GOLD.alpha(220), Align::Left);
+                }
+                CompItem::Text { text, strong } => {
+                    let color = if *strong { TEXT } else { Rgba(205, 212, 230, 255) };
+                    let weight = if *strong { Weight::Bold } else { Weight::Medium };
+                    ctx.label(c, text, x + 8.0 * s, cy, Self::TEXT_PX, weight, color, Align::Left);
+                }
+                CompItem::Card { card_id, name, tier } => {
+                    let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
+                    ctx.tile_row(c, card_id, x, ry, iw, rh, base);
+                    if hover {
+                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
+                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                    }
+                    let name = ctx.fonts.fit(name, 12.0 * s, Weight::Medium, iw - 44.0 * s);
+                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, TEXT);
+                    if *tier > 0 {
+                        let tx = x + iw - 14.0 * s;
+                        c.circle(tx, cy, 9.5 * s, Rgba(0, 0, 0, 170));
+                        c.circle(tx, cy, 8.5 * s, ACCENT);
+                        ctx.label(c, &tier.to_string(), tx, cy, 11.0, Weight::Bold, TEXT, Align::Center);
+                    }
+                }
+                CompItem::Note(text) => {
+                    let text = ctx.fonts.fit(text, 11.5 * s, Weight::Medium, iw - 16.0 * s);
+                    ctx.label(c, &text, c.width() / 2.0, cy, 11.5, Weight::Medium, DIM, Align::Center);
+                }
+                CompItem::Gap => {}
+            }
         }
     }
 }

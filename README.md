@@ -10,12 +10,31 @@ só para as tribos da lobby, um campo da memória do cliente.
 |---|---|---|
 | Chances do combate | topo, centro | Letal / Vitória / Empate / Derrota / Letal, simuladas no início de cada combate (fica esmaecido na loja mostrando o último combate) |
 | Turno + tiers | topo, direita | Turno atual e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
+| Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
 | Tribos + partidas | esquerda | Tribos da lobby e as últimas partidas com colocação e média da sessão |
 | Tabuleiro do oponente | ao passar o mouse no leaderboard | Último tabuleiro visto daquele jogador (stats, palavras-chave, tier, há quantos turnos) |
 
-Não incluído: estatísticas exclusivas do HSReplay (composições, MMR de
-heróis) e o MMR do jogador.
+Não incluído: estatísticas exclusivas do HSReplay Premium (MMR e
+estatísticas de heróis/comps) e o MMR do jogador.
+
+### Comps do meta
+
+O botão **Comps** na barra do topo abre a tier list de composições do
+HSReplay (a mesma lista pública de guias que o HDT usa), agrupada em S/A/B/…
+Cada comp mostra tribo, dificuldade e uma seta quando subiu ▲ ou caiu ▼ de
+tier desde a última atualização.
+
+- **Lobby only**: esconde as comps cuja tribo não está na lobby (desligado,
+  elas aparecem esmaecidas com "not in lobby"). Comps mistas (ex.: Menagerie)
+  sempre aparecem. Compartilha o estado com o toggle da lista de minions.
+- Clique numa comp para abrir o guia: cartas core e add-ons (com o tier de
+  cada uma; hover mostra a carta), quando entrar na comp, enablers e como
+  jogar. **‹** ou botão direito volta para a lista; botão direito na lista
+  fecha.
+
+Os guias são baixados em segundo plano e ficam em cache por 6 h
+(`~/.cache/hsbg-overlay/comp_guides.json`); sem rede, o cache antigo é usado.
 
 ### Lista de minions
 
@@ -106,6 +125,8 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
 - `src/memory`: leitor mínimo do runtime Mono (domínio raiz → assemblies →
   classes → campos) via `/proc/<pid>/mem`, numa thread que consulta a cada
   0,7 s.
+- `src/comps.rs`: tier list e guias de comps de
+  `hsreplay.net/api/v1/battlegrounds/comp_guides/` (público, sem login).
 - `src/x11.rs` + `src/ui`: janelas ARGB override-redirect desenhadas com
   tiny-skia/fontdue; posições relativas à janela do jogo, que é rastreada a
   cada 250 ms.

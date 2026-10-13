@@ -7,6 +7,7 @@ use anyhow::Result;
 use x11rb::protocol::Event;
 
 use crate::cards::{CardDb, GroupKind, Tribe};
+use crate::comps::{CompGuide, Comps, CompsState};
 use crate::config::{Config, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
 use crate::history::{self, GameRecord, History};
@@ -16,8 +17,8 @@ use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts};
 use crate::ui::panels::{
-    self, CardPreview, Calibration, TierHit, Ctx, InfoPanel, MinionView, OddsView, OpponentPopup, SimPanel, TierList, TierRow,
-    TierSection, TopBar,
+    self, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
+    OpponentPopup, SimPanel, TierHit, TierList, TierRow, TierSection, TopBar, TopHit,
 };
 use crate::x11::{GameWindow, OverlayWindow, Rect, X11};
 
@@ -41,12 +42,20 @@ pub struct UiState {
     /// Keyword filter for the tier list (index into `KEYWORDS`).
     pub keyword: Option<usize>,
     pub filter_open: bool,
-    pub tier_hover: Option<i32>,
+    /// Top bar button under the pointer.
+    pub top_hover: Option<TopHit>,
     pub scroll: f32,
     /// Element of the tier list under the pointer.
     pub list_hover: Option<TierHit>,
     /// Leaderboard slot (0 = first place) under the pointer.
     pub slot_hover: Option<usize>,
+    pub comps_open: bool,
+    /// Comp whose guide is shown instead of the tier list.
+    pub comp_id: Option<i32>,
+    pub comp_scroll: f32,
+    /// Where the tier list was scrolled before opening a guide.
+    pub comp_list_scroll: f32,
+    pub comp_hover: Option<CompHit>,
 }
 
 impl UiState {
@@ -54,6 +63,14 @@ impl UiState {
     pub fn row_hover(&self) -> Option<usize> {
         match self.list_hover {
             Some(TierHit::Row(i)) => Some(i),
+            _ => None,
+        }
+    }
+
+    /// Comps panel item under the pointer.
+    pub fn comp_item_hover(&self) -> Option<usize> {
+        match self.comp_hover {
+            Some(CompHit::Item(i)) => Some(i),
             _ => None,
         }
     }
@@ -143,6 +160,7 @@ pub struct Overlay {
     pub history: History,
     pub images: Images,
     pub fonts: Fonts,
+    pub comps: Comps,
     pub sim_view: SimView,
     pub ui: UiState,
     last_combat: Option<Box<CombatSnapshot>>,
@@ -196,6 +214,7 @@ impl Overlay {
             history,
             images: Images::new(),
             fonts: Fonts::load(),
+            comps: Comps::new(),
             sim_view: SimView::default(),
             ui: UiState { hide_unavailable: cfg.hide_unavailable_tribes, ..UiState::default() },
             last_combat: None,
@@ -247,7 +266,10 @@ impl Overlay {
                     self.sim_view = SimView::default();
                     self.ui.selected_tier = None;
                     self.ui.scroll = 0.0;
+                    self.ui.comps_open = false;
+                    self.ui.comp_id = None;
                     self.last_combat = None;
+                    self.comps.refresh();
                 }
                 GameEvent::Combat(snap) => {
                     self.sim_view = SimView { turn: snap.turn, ..SimView::default() };
@@ -316,9 +338,11 @@ impl Overlay {
         TopBar {
             turn: self.game.turn(),
             tavern_tier: self.game.tavern_tier(),
-            max_tier: self.game.max_tavern_tier(),
+            max_tier: if self.cfg.show_tiers { self.game.max_tavern_tier() } else { 0 },
             selected: self.ui.selected_tier,
-            hover: self.ui.tier_hover,
+            hover: self.ui.top_hover,
+            comps: self.cfg.show_comps,
+            comps_open: self.ui.comps_open,
         }
     }
 
@@ -387,6 +411,124 @@ impl Overlay {
             keyword: self.ui.keyword,
             filter_open: self.ui.filter_open,
         })
+    }
+
+    pub fn comp_panel(&self) -> Option<CompPanel> {
+        if !self.ui.comps_open {
+            return None;
+        }
+        let lobby = self.lobby_tribes();
+        let in_lobby = |g: &CompGuide| g.tribe.is_none_or(|t| !lobby.complete || lobby.tribes.contains(&t));
+        let tribe = |g: &CompGuide| g.tribe.map(|t| t.label()).unwrap_or("Mixed");
+        let mut panel = CompPanel {
+            title: "Meta Comps".to_string(),
+            subtitle: String::new(),
+            detail: None,
+            items: Vec::new(),
+            scroll: self.ui.comp_scroll,
+            hover: self.ui.comp_hover,
+            images_rev: self.images.revision(),
+            hide_unavailable: self.ui.hide_unavailable,
+        };
+        match &self.comps.state {
+            CompsState::Loading => {
+                panel.subtitle = "HSReplay tier list".to_string();
+                panel.items.push(CompItem::Note("Loading comps…".to_string()));
+                return Some(panel);
+            }
+            CompsState::Failed => {
+                panel.subtitle = "HSReplay tier list".to_string();
+                panel.items.push(CompItem::Note("Could not load comps · reopen to retry".to_string()));
+                return Some(panel);
+            }
+            CompsState::Ready(_) => {}
+        }
+        if let Some(g) = self.ui.comp_id.and_then(|id| self.comps.get(id)) {
+            let mut sub = vec![format!("{} tier", g.tier_letter()), tribe(g).to_string()];
+            sub.extend((!g.difficulty_label().is_empty()).then(|| g.difficulty_label().to_string()));
+            if !in_lobby(g) {
+                sub.push("not in lobby".to_string());
+            }
+            panel.title = g.name.clone();
+            panel.subtitle = sub.join(" · ");
+            panel.detail = Some(g.tier_letter());
+            panel.items = self.comp_guide_items(g);
+            return Some(panel);
+        }
+        panel.subtitle = if lobby.complete {
+            "HSReplay tier list · this lobby".to_string()
+        } else {
+            "HSReplay tier list · all tribes".to_string()
+        };
+        let shown: Vec<&CompGuide> =
+            self.comps.guides().iter().filter(|g| !(self.ui.hide_unavailable && !in_lobby(g))).collect();
+        for (i, g) in shown.iter().enumerate() {
+            if i == 0 || shown[i - 1].tier != g.tier {
+                let count = shown.iter().filter(|o| o.tier == g.tier).count();
+                panel.items.push(CompItem::Tier { letter: g.tier_letter(), count });
+            }
+            let mut detail = vec![tribe(g)];
+            detail.extend((!g.difficulty_label().is_empty()).then(|| g.difficulty_label()));
+            let dim = !in_lobby(g);
+            if dim {
+                detail.push("not in lobby");
+            }
+            panel.items.push(CompItem::Comp(CompRow {
+                id: g.id,
+                name: g.name.clone(),
+                detail: detail.join(" · "),
+                color: g.tribe.map(panels::tribe_color).unwrap_or(panels::theme::GOLD),
+                card_id: g.representative_card.clone(),
+                trend: g.trend(),
+                dim,
+            }));
+        }
+        if shown.is_empty() {
+            panel.items.push(CompItem::Note("No comps for this lobby's tribes".to_string()));
+        }
+        Some(panel)
+    }
+
+    /// The guide of one comp: its cards, then the strategy text.
+    fn comp_guide_items(&self, g: &CompGuide) -> Vec<CompItem> {
+        let mut items = Vec::new();
+        let text = |items: &mut Vec<CompItem>, heading: Option<&'static str>, body: &str, strong: bool| {
+            let weight = if strong { crate::ui::draw::Weight::Bold } else { crate::ui::draw::Weight::Medium };
+            let lines = self.fonts.wrap(body, CompPanel::TEXT_PX, weight, CompPanel::TEXT_W);
+            if lines.is_empty() {
+                return;
+            }
+            items.extend(heading.map(CompItem::Heading));
+            items.extend(lines.into_iter().map(|text| CompItem::Text { text, strong }));
+        };
+        text(&mut items, None, &g.summary, true);
+        for (heading, dbfs) in [("CORE CARDS", &g.core_cards), ("ADD-ONS", &g.addon_cards)] {
+            let cards: Vec<_> = dbfs.iter().filter_map(|&d| self.db.by_dbf(d)).collect();
+            if cards.is_empty() {
+                continue;
+            }
+            items.push(CompItem::Heading(heading));
+            items.extend(cards.into_iter().map(|c| CompItem::Card {
+                card_id: c.id.clone(),
+                name: c.name.clone(),
+                tier: c.tier,
+            }));
+        }
+        text(&mut items, Some("WHEN TO COMMIT"), &g.when_to_commit, false);
+        text(&mut items, Some("KEY ENABLERS"), &g.common_enablers, false);
+        text(&mut items, Some("HOW TO PLAY"), &g.how_to_play, false);
+        if items.first().is_some_and(|i| matches!(i, CompItem::Text { .. })) {
+            items.insert(0, CompItem::Gap);
+        }
+        items.push(CompItem::Gap);
+        items
+    }
+
+    pub fn comp_preview(&self, panel: &CompPanel) -> Option<CardPreview> {
+        match panel.item(self.ui.comp_item_hover()?)? {
+            CompItem::Card { card_id, .. } => Some(CardPreview { card_id: card_id.clone(), images_rev: self.images.revision() }),
+            _ => None,
+        }
     }
 
     pub fn sim_panel(&self) -> SimPanel {
@@ -517,18 +659,20 @@ struct Panels {
     sim: Panel<SimPanel>,
     top: Panel<TopBar>,
     tiers: Panel<TierList>,
+    comps: Panel<CompPanel>,
     preview: Panel<CardPreview>,
     popup: Panel<OpponentPopup>,
     calib: Panel<Calibration>,
 }
 
 impl Panels {
-    fn windows(&self) -> [&OverlayWindow; 7] {
+    fn windows(&self) -> [&OverlayWindow; 8] {
         [
             &self.info.win,
             &self.sim.win,
             &self.top.win,
             &self.tiers.win,
+            &self.comps.win,
             &self.calib.win,
             &self.preview.win,
             &self.popup.win,
@@ -540,6 +684,7 @@ impl Panels {
         self.sim.hide(x);
         self.top.hide(x);
         self.tiers.hide(x);
+        self.comps.hide(x);
         self.preview.hide(x);
         self.popup.hide(x);
         self.calib.hide(x);
@@ -566,8 +711,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(ov: Overlay, logs_dir: &Path, sim: SimClient, calibrate: bool) -> Result<App> {
+    pub fn new(mut ov: Overlay, logs_dir: &Path, sim: SimClient, calibrate: bool) -> Result<App> {
         let x = X11::connect()?;
+        if ov.cfg.show_comps {
+            ov.comps.refresh();
+        }
         log::info!("compositor {}", if x.compositing { "detected: translucent panels" } else { "not detected: opaque panels" });
         x.watch_root()?;
         let panels = Panels {
@@ -575,6 +723,7 @@ impl App {
             sim: Panel::new(&x, "hsbg-odds", false)?,
             top: Panel::new(&x, "hsbg-tiers-bar", true)?,
             tiers: Panel::new(&x, "hsbg-tiers", true)?,
+            comps: Panel::new(&x, "hsbg-comps", true)?,
             preview: Panel::new(&x, "hsbg-preview", false)?,
             popup: Panel::new(&x, "hsbg-opponent", false)?,
             calib: Panel::new(&x, "hsbg-calibration", false)?,
@@ -608,6 +757,7 @@ impl App {
                 self.dirty = true;
             }
             self.dirty |= self.ov.images.poll();
+            self.dirty |= self.ov.comps.poll();
             self.poll_lobby_reader();
             self.track_game_window();
             self.handle_x_events();
@@ -754,11 +904,68 @@ impl App {
                 }
                 Event::ButtonPress(e) if e.event == self.panels.top.win.id && e.detail == 1 => {
                     let hit = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s));
-                    if let Some(t) = hit {
-                        self.ov.ui.selected_tier = if self.ov.ui.selected_tier == Some(t) { None } else { Some(t) };
-                        self.ov.ui.scroll = 0.0;
-                        self.ov.ui.list_hover = None;
+                    let ui = &mut self.ov.ui;
+                    match hit {
+                        Some(TopHit::Tier(t)) => {
+                            ui.selected_tier = if ui.selected_tier == Some(t) { None } else { Some(t) };
+                            ui.scroll = 0.0;
+                            ui.list_hover = None;
+                            ui.comps_open = false;
+                        }
+                        Some(TopHit::Comps) => {
+                            ui.comps_open = !ui.comps_open;
+                            ui.comp_hover = None;
+                            ui.selected_tier = None;
+                            if ui.comps_open {
+                                self.ov.comps.refresh();
+                            }
+                        }
+                        None => {}
                     }
+                }
+                Event::ButtonPress(e) if e.event == self.panels.comps.win.id && (e.detail == 4 || e.detail == 5) => {
+                    let step = 27.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
+                    if let Some(m) = self.panels.comps.model() {
+                        let max = m.max_scroll(s, self.panels.comps.win.rect.h);
+                        self.ov.ui.comp_scroll = (self.ov.ui.comp_scroll + step).clamp(0.0, max);
+                        self.ov.ui.comp_hover = m.hit(e.event_x as f32, e.event_y as f32, s);
+                    }
+                }
+                Event::ButtonPress(e) if e.event == self.panels.comps.win.id && (e.detail == 1 || e.detail == 3) => {
+                    let model = self.panels.comps.model();
+                    let hit = model.and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let clicked = match (model, hit) {
+                        (Some(m), Some(CompHit::Item(i))) => match m.item(i) {
+                            Some(CompItem::Comp(row)) => Some(row.id),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let ui = &mut self.ov.ui;
+                    match (e.detail, hit) {
+                        // Right click: back to the tier list, or close.
+                        (3, _) if ui.comp_id.is_some() => {
+                            ui.comp_id = None;
+                            ui.comp_scroll = ui.comp_list_scroll;
+                        }
+                        (3, _) => ui.comps_open = false,
+                        (_, Some(CompHit::LobbyToggle)) => {
+                            ui.hide_unavailable = !ui.hide_unavailable;
+                            ui.comp_scroll = 0.0;
+                        }
+                        (_, Some(CompHit::Back)) => {
+                            ui.comp_id = None;
+                            ui.comp_scroll = ui.comp_list_scroll;
+                        }
+                        _ => {
+                            if let Some(id) = clicked {
+                                ui.comp_id = Some(id);
+                                ui.comp_list_scroll = ui.comp_scroll;
+                                ui.comp_scroll = 0.0;
+                            }
+                        }
+                    }
+                    ui.comp_hover = None;
                 }
                 Event::ButtonPress(e) if e.event == self.panels.tiers.win.id && (e.detail == 4 || e.detail == 5) => {
                     let step = 27.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
@@ -794,13 +1001,23 @@ impl App {
                     ui.list_hover = None;
                 }
                 Event::MotionNotify(e) if e.event == self.panels.top.win.id => {
-                    self.ov.ui.tier_hover = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s));
+                    self.ov.ui.top_hover = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s));
+                }
+                Event::MotionNotify(e) if e.event == self.panels.comps.win.id => {
+                    self.ov.ui.comp_hover = self.panels.comps.model().and_then(|m| {
+                        let hit = m.hit(e.event_x as f32, e.event_y as f32, s)?;
+                        match hit {
+                            CompHit::Item(i) => m.item(i)?.hoverable().then_some(hit),
+                            _ => Some(hit),
+                        }
+                    });
                 }
                 Event::MotionNotify(e) if e.event == self.panels.tiers.win.id => {
                     self.ov.ui.list_hover =
                         self.panels.tiers.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
                 }
-                Event::LeaveNotify(e) if e.event == self.panels.top.win.id => self.ov.ui.tier_hover = None,
+                Event::LeaveNotify(e) if e.event == self.panels.top.win.id => self.ov.ui.top_hover = None,
+                Event::LeaveNotify(e) if e.event == self.panels.comps.win.id => self.ov.ui.comp_hover = None,
                 Event::LeaveNotify(e) if e.event == self.panels.tiers.win.id => self.ov.ui.list_hover = None,
                 Event::ConfigureNotify(e) if !self.is_ours(e.window) => self.need_raise = true,
                 Event::MapNotify(e) if !self.is_ours(e.window) => self.need_raise = true,
@@ -838,11 +1055,24 @@ impl App {
         let top = self.ov.top_bar();
         let tiers = self.ov.tier_list();
         let popup = self.ov.ui.slot_hover.and_then(|slot| self.ov.popup(slot).map(|p| (slot, p)));
-        let preview = tiers.as_ref().and_then(|t| self.ov.preview(t));
+        let comps = self.ov.comp_panel();
+        // Card under the pointer, with the item it belongs to.
+        let preview = tiers
+            .as_ref()
+            .and_then(|t| self.ov.preview(t))
+            .map(|pv| (pv, self.ov.ui.row_hover().unwrap_or(0)))
+            .or_else(|| comps.as_ref().and_then(|c| self.ov.comp_preview(c)).map(|pv| (pv, self.ov.ui.comp_item_hover().unwrap_or(0))));
+        // Hover previews then only need a decode, not a download.
         if let Some(list) = &tiers {
-            // Hover previews then only need a decode, not a download.
             for row in list.sections.iter().flat_map(|sec| &sec.rows) {
                 self.ov.images.prefetch(ImageKind::Render, &row.card_id);
+            }
+        }
+        if let Some(panel) = &comps {
+            for item in &panel.items {
+                if let CompItem::Card { card_id, .. } = item {
+                    self.ov.images.prefetch(ImageKind::Render, card_id);
+                }
             }
         }
 
@@ -858,38 +1088,50 @@ impl App {
             p.info.hide(x);
         }
         let top_rect = layout.top_bar(top.size(s));
+        let show_top = in_game && (cfg.show_tiers || cfg.show_comps);
         if in_game && cfg.show_simulation && self.ov.game.turn() >= 1 {
-            let rect = layout.sim(sim.size(s), (in_game && cfg.show_tiers).then_some(top_rect));
+            let rect = layout.sim(sim.size(s), show_top.then_some(top_rect));
             p.sim.update(x, rect, &sim, &mut ctx, |m, c, ctx| m.render(c, ctx));
         } else {
             p.sim.hide(x);
         }
-        let mut tier_rect = None;
-        if in_game && cfg.show_tiers {
+        // Window of the open list and the centre of the hovered item in it.
+        let mut hovered_at: Option<(Rect, f32)> = None;
+        if show_top {
             p.top.update(x, top_rect, &top, &mut ctx, |m, c, ctx| m.render(c, ctx));
-            if let Some(list) = &tiers {
+        } else {
+            p.top.hide(x);
+        }
+        match &tiers {
+            Some(list) if show_top && cfg.show_tiers => {
                 let (tx, ty, max_h) = layout.tier_list(top_rect, (TierList::W * s).ceil() as i32);
                 let (w, h) = list.size(s, max_h);
                 let rect = Rect::new(tx, ty, w, h);
                 p.tiers.update(x, rect, list, &mut ctx, |m, c, ctx| m.render(c, ctx));
-                tier_rect = Some(rect);
-            } else {
-                p.tiers.hide(x);
+                hovered_at = preview.as_ref().map(|(_, i)| (rect, list.row_center(*i, s).unwrap_or(0.0)));
             }
-        } else {
-            p.top.hide(x);
-            p.tiers.hide(x);
+            _ => p.tiers.hide(x),
         }
-        let preview_rect = match (&preview, &tiers, tier_rect) {
-            (Some(pv), Some(list), Some(tr)) => pv.size(s, ctx.images).map(|(w, h)| {
-                let cy = tr.y + list.row_center(self.ov.ui.row_hover().unwrap_or(0), s).unwrap_or(0.0) as i32;
+        match &comps {
+            Some(panel) if show_top && cfg.show_comps => {
+                let (tx, ty, max_h) = layout.tier_list(top_rect, (CompPanel::W * s).ceil() as i32);
+                let (w, h) = panel.size(s, max_h);
+                let rect = Rect::new(tx, ty, w, h);
+                p.comps.update(x, rect, panel, &mut ctx, |m, c, ctx| m.render(c, ctx));
+                hovered_at = hovered_at.or_else(|| preview.as_ref().map(|(_, i)| (rect, panel.item_center(*i, s).unwrap_or(0.0))));
+            }
+            _ => p.comps.hide(x),
+        }
+        let preview_rect = match (&preview, hovered_at) {
+            (Some((pv, _)), Some((pr, center))) => pv.size(s, ctx.images).map(|(w, h)| {
+                let cy = pr.y + center as i32;
                 let y = (cy - h / 2).clamp(layout.hs.y, (layout.hs.y + layout.hs.h - h).max(layout.hs.y));
-                Rect::new(tr.x - w - (8.0 * s) as i32, y, w, h)
+                Rect::new(pr.x - w - (8.0 * s) as i32, y, w, h)
             }),
             _ => None,
         };
         match (preview, preview_rect) {
-            (Some(pv), Some(rect)) => p.preview.update(x, rect, &pv, &mut ctx, |m, c, ctx| m.render(c, ctx)),
+            (Some((pv, _)), Some(rect)) => p.preview.update(x, rect, &pv, &mut ctx, |m, c, ctx| m.render(c, ctx)),
             _ => p.preview.hide(x),
         }
         match popup {
@@ -1024,11 +1266,46 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     ov.ui.filter_open = false;
     ov.ui.keyword = crate::cards::KEYWORDS.iter().position(|k| k.label == "Deathrattle");
     variants.extend(ov.tier_list().map(|l| ("tiers-deathrattle", l)));
+    // Comps: the tier list and the first comp's guide.
+    let mut comp_panels = Vec::new();
+    match crate::comps::load_or_fetch() {
+        Ok(guides) => {
+            let first = guides.first().map(|g| g.id);
+            ov.comps = Comps::with_guides(guides);
+            ov.ui.comps_open = true;
+            ov.ui.comp_hover = Some(CompHit::Item(1));
+            comp_panels.extend(ov.comp_panel().map(|p| ("comps", p)));
+            ov.ui.comp_id = first;
+            ov.ui.comp_hover = None;
+            comp_panels.extend(ov.comp_panel().map(|p| ("comp-guide", p)));
+            ov.ui.comps_open = false;
+        }
+        Err(e) => log::warn!("{e:#}"),
+    }
+    let ids: Vec<String> = comp_panels
+        .iter()
+        .flat_map(|(_, p)| &p.items)
+        .filter_map(|i| match i {
+            CompItem::Comp(r) => Some(r.card_id.clone()),
+            CompItem::Card { card_id, .. } => Some(card_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while ids.iter().filter(|id| ov.images.get(ImageKind::Tile, id).is_none()).count() > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        ov.images.poll();
+    }
     let mut ctx = Ctx { fonts: &mut ov.fonts, images: &mut ov.images, s, opaque: false };
     for (name, l) in &variants {
         let (w, h) = l.size(s, (hs.h as f32 * 0.85) as i32);
         let mut scratch = Canvas::new(w, h);
         emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| l.render(c, ctx))?;
+    }
+    for (name, p) in &comp_panels {
+        let (w, h) = p.size(s, (hs.h as f32 * 0.85) as i32);
+        let mut scratch = Canvas::new(w, h);
+        emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| p.render(c, ctx))?;
     }
     let sc = &mut screen;
     emit(sc, &mut ctx, out, "info", layout.info(info.size(s)), &|c, ctx| info.render(c, ctx))?;
@@ -1179,6 +1456,58 @@ mod tests {
         // First chip ("Any") right under the bar, second is the first keyword.
         assert_eq!(open.hit(20.0, 82.0, 1.0), Some(TierHit::Keyword(None)));
         assert_eq!(open.hit(110.0, 82.0, 1.0), Some(TierHit::Keyword(Some(0))));
+    }
+
+    fn guide(id: i32, tier: i32, tribe: Option<Tribe>) -> CompGuide {
+        CompGuide {
+            id,
+            name: format!("Comp {id}"),
+            tier,
+            tier_rank: 0,
+            difficulty: 1,
+            tribe,
+            core_cards: vec![1],
+            addon_cards: vec![],
+            representative_card: String::new(),
+            summary: "Scale.".into(),
+            how_to_play: String::new(),
+            when_to_commit: String::new(),
+            common_enablers: String::new(),
+            previous_tier: None,
+        }
+    }
+
+    #[test]
+    fn comp_list_follows_lobby_and_opens_guides() {
+        let mut ov = overlay();
+        ov.db = CardDb::parse(br#"[{"id":"B1","dbfId":1,"name":"Bat","type":"Minion","techLevel":2}]"#, Path::new("test")).unwrap();
+        ov.comps = Comps::with_guides(vec![
+            guide(1, 1, Some(Tribe::Beast)),
+            guide(2, 1, Some(Tribe::Undead)),
+            guide(3, 2, None),
+        ]);
+        ov.set_lobby_memory(memory(1, &LOBBY));
+        ov.ui.comps_open = true;
+        let shown = |ov: &Overlay| -> Vec<String> {
+            ov.comp_panel()
+                .unwrap()
+                .items
+                .iter()
+                .map(|i| match i {
+                    CompItem::Tier { letter, .. } => letter.to_string(),
+                    CompItem::Comp(r) => format!("{}{}", r.id, if r.dim { "-" } else { "" }),
+                    _ => "?".into(),
+                })
+                .collect()
+        };
+        ov.ui.hide_unavailable = true;
+        assert_eq!(shown(&ov), ["S", "1", "A", "3"]);
+        ov.ui.hide_unavailable = false;
+        assert_eq!(shown(&ov), ["S", "1", "2-", "A", "3"]);
+        ov.ui.comp_id = Some(1);
+        let guide = ov.comp_panel().unwrap();
+        assert_eq!(guide.detail, Some("S"));
+        assert!(guide.items.iter().any(|i| matches!(i, CompItem::Card { card_id, tier: 2, .. } if card_id == "B1")));
     }
 
     #[test]
