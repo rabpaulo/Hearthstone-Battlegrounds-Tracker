@@ -2,6 +2,7 @@ mod app;
 mod cards;
 mod comps;
 mod config;
+mod enablers;
 mod game;
 mod history;
 mod images;
