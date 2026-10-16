@@ -578,6 +578,7 @@ impl Overlay {
         };
         let shown: Vec<&CompGuide> =
             self.comps.guides().iter().filter(|g| !(self.ui.hide_unavailable && !in_lobby(g))).collect();
+        let hero = self.base_hero();
         for (i, g) in shown.iter().enumerate() {
             if i == 0 || shown[i - 1].tier != g.tier {
                 let count = shown.iter().filter(|o| o.tier == g.tier).count();
@@ -589,6 +590,10 @@ impl Overlay {
             if dim {
                 detail.push("not in lobby");
             }
+            let your_hero = hero.is_some_and(|h| self.comps.enablers(g, &self.db).is_some_and(|a| a.heroes.iter().any(|e| e.hero == h)));
+            if your_hero {
+                detail.push("your hero");
+            }
             panel.items.push(CompItem::Comp(CompRow {
                 id: g.id,
                 name: g.name.clone(),
@@ -597,6 +602,7 @@ impl Overlay {
                 card_id: g.representative_card.clone(),
                 trend: g.trend(),
                 dim,
+                your_hero,
             }));
         }
         if shown.is_empty() {
@@ -605,7 +611,13 @@ impl Overlay {
         Some(panel)
     }
 
-    /// The guide of one comp: its cards, then the strategy text.
+    /// The player's hero as hero stats name it, without its skin.
+    fn base_hero(&self) -> Option<&str> {
+        let id = &self.game.local_hero()?.card_id;
+        Some(id.split("_SKIN_").next().unwrap_or(id))
+    }
+
+    /// The guide of one comp: its cards, its hero enablers, then the strategy text.
     fn comp_guide_items(&self, g: &CompGuide) -> Vec<CompItem> {
         let mut items = Vec::new();
         let text = |items: &mut Vec<CompItem>, heading: Option<&'static str>, body: &str, strong: bool| {
@@ -628,6 +640,21 @@ impl Overlay {
                 card_id: c.id.clone(),
                 name: c.name.clone(),
                 tier: c.tier,
+            }));
+        }
+        if let Some(a) = self.comps.enablers(g, &self.db) {
+            items.push(CompItem::Heading("HERO ENABLERS"));
+            let note = match g.tribe {
+                Some(t) if a.tribe_wide => format!("× more often in {} comps · avg place", t.label()),
+                _ => "× more often than other heroes · avg place".to_string(),
+            };
+            text(&mut items, None, &note, false);
+            let hero = self.base_hero();
+            items.extend(a.heroes.iter().map(|e| CompItem::Hero {
+                card_id: e.hero.clone(),
+                name: self.db.name(&e.hero).to_string(),
+                detail: format!("{:.1}× · {:.1}", e.lift, e.placement),
+                yours: hero == Some(e.hero.as_str()),
             }));
         }
         text(&mut items, Some("WHEN TO COMMIT"), &g.when_to_commit, false);
@@ -688,7 +715,9 @@ impl Overlay {
 
     pub fn comp_preview(&self, panel: &CompPanel) -> Option<CardPreview> {
         match panel.item(self.ui.comp_item_hover()?)? {
-            CompItem::Card { card_id, .. } => Some(CardPreview { card_id: card_id.clone(), images_rev: self.images.revision() }),
+            CompItem::Card { card_id, .. } | CompItem::Hero { card_id, .. } => {
+                Some(CardPreview { card_id: card_id.clone(), images_rev: self.images.revision() })
+            }
             _ => None,
         }
     }
@@ -1650,7 +1679,11 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     match crate::comps::load_or_fetch() {
         Ok(guides) => {
             let first = guides.first().map(|g| g.id);
-            ov.comps = Comps::with_guides(guides);
+            let archetypes = crate::enablers::load_or_fetch().unwrap_or_else(|e| {
+                log::warn!("{e:#}");
+                Vec::new()
+            });
+            ov.comps = Comps::with_guides(guides, archetypes);
             ov.ui.comps_open = true;
             ov.ui.comp_hover = Some(CompHit::Item(1));
             comp_panels.extend(ov.comp_panel().map(|p| ("comps", p)));
@@ -1681,7 +1714,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         .flat_map(|(_, p)| &p.items)
         .filter_map(|i| match i {
             CompItem::Comp(r) => Some(r.card_id.clone()),
-            CompItem::Card { card_id, .. } => Some(card_id.clone()),
+            CompItem::Card { card_id, .. } | CompItem::Hero { card_id, .. } => Some(card_id.clone()),
             _ => None,
         })
         .chain(search_panels.iter().flat_map(|(_, p)| p.rows.iter().take(25).map(|r| r.card_id.clone())))
@@ -1882,11 +1915,17 @@ mod tests {
     fn comp_list_follows_lobby_and_opens_guides() {
         let mut ov = overlay();
         ov.db = CardDb::parse(br#"[{"id":"B1","dbfId":1,"name":"Bat","type":"Minion","techLevel":2}]"#, Path::new("test")).unwrap();
-        ov.comps = Comps::with_guides(vec![
-            guide(1, 1, Some(Tribe::Beast)),
-            guide(2, 1, Some(Tribe::Undead)),
-            guide(3, 2, None),
-        ]);
+        let beasts = crate::enablers::Archetype {
+            id: "beast_tribe".into(),
+            tribe_wide: true,
+            core: vec![],
+            cards: vec![],
+            heroes: vec![crate::enablers::HeroEnabler { hero: "H1".into(), games: 90, lift: 4.04, placement: 3.21 }],
+        };
+        ov.comps = Comps::with_guides(
+            vec![guide(1, 1, Some(Tribe::Beast)), guide(2, 1, Some(Tribe::Undead)), guide(3, 2, None)],
+            vec![beasts],
+        );
         ov.set_lobby_memory(memory(1, &LOBBY));
         ov.ui.comps_open = true;
         let shown = |ov: &Overlay| -> Vec<String> {
@@ -1909,6 +1948,14 @@ mod tests {
         let guide = ov.comp_panel().unwrap();
         assert_eq!(guide.detail, Some("S"));
         assert!(guide.items.iter().any(|i| matches!(i, CompItem::Card { card_id, tier: 2, .. } if card_id == "B1")));
+        assert!(guide.items.contains(&CompItem::Heading("HERO ENABLERS")));
+        let hero = guide.items.iter().find_map(|i| match i {
+            CompItem::Hero { card_id, detail, .. } => Some((card_id.as_str(), detail.as_str())),
+            _ => None,
+        });
+        assert_eq!(hero, Some(("H1", "4.0× · 3.2")));
+        ov.ui.comp_id = Some(2);
+        assert!(!ov.comp_panel().unwrap().items.contains(&CompItem::Heading("HERO ENABLERS")), "no stats for Undead");
     }
 
     #[test]

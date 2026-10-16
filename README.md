@@ -30,12 +30,21 @@ tier desde a última atualização.
   elas aparecem esmaecidas com "not in lobby"). Comps mistas (ex.: Menagerie)
   sempre aparecem. Compartilha o estado com o toggle da lista de minions.
 - Clique numa comp para abrir o guia: cartas core e add-ons (com o tier de
-  cada uma; hover mostra a carta), quando entrar na comp, enablers e como
-  jogar. **‹** ou botão direito volta para a lista; botão direito na lista
-  fecha.
+  cada uma; hover mostra a carta), heróis enablers, quando entrar na comp,
+  enablers e como jogar. **‹** ou botão direito volta para a lista; botão
+  direito na lista fecha.
+- **Hero enablers**: heróis que terminam nessa comp muito mais vezes que os
+  outros (ex.: Flurgl em Murlocs, Patches em Pirates, Ysera em Dragons), com
+  quantas vezes mais (`5.2×`) e a colocação média do herói nela. Vêm das
+  estatísticas públicas de comps da Firestone (último patch); a comp do
+  HSReplay é casada com a da Firestone pelas cartas e, sem par, usa todas as
+  comps da tribo. Com o seu herói entre os enablers, ele fica em dourado no
+  guia e a comp mostra "your hero" na lista.
 
 Os guias são baixados em segundo plano e ficam em cache por 6 h
 (`~/.cache/hsbg-overlay/comp_guides.json`); sem rede, o cache antigo é usado.
+O mesmo vale para os hero enablers: as estatísticas (~7 MB comprimidos) são
+resumidas e só o resumo fica em `~/.cache/hsbg-overlay/hero_enablers.json`.
 
 ### Busca de cartas
 

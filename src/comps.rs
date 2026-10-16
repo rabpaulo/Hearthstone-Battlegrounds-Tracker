@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-use crate::cards::Tribe;
+use crate::cards::{CardDb, Tribe};
+use crate::enablers::{self, Archetype};
 use crate::{net, paths};
 
 const URL: &str = "https://hsreplay.net/api/v1/battlegrounds/comp_guides/?language=en";
@@ -191,38 +192,62 @@ pub enum CompsState {
     Failed,
 }
 
-/// Guides as the UI sees them, loaded in the background.
+type Loading<T> = Option<Receiver<Result<T, String>>>;
+
+fn spawn_load<T: Send + 'static>(load: fn() -> Result<T>) -> Loading<T> {
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(load().map_err(|e| format!("{e:#}")));
+    });
+    Some(rx)
+}
+
+/// Guides as the UI sees them, loaded in the background, with the heroes
+/// that enable each comp (loaded separately: their stats are much larger).
 pub struct Comps {
     pub state: CompsState,
-    rx: Option<Receiver<Result<Vec<CompGuide>, String>>>,
+    rx: Loading<Vec<CompGuide>>,
     loaded_at: Option<Instant>,
+    archetypes: Vec<Archetype>,
+    archetypes_rx: Loading<Vec<Archetype>>,
 }
 
 impl Comps {
     /// Nothing loaded yet; `refresh` starts the download.
     pub fn new() -> Comps {
-        Comps { state: CompsState::Loading, rx: None, loaded_at: None }
+        Comps { state: CompsState::Loading, rx: None, loaded_at: None, archetypes: Vec::new(), archetypes_rx: None }
     }
 
-    pub fn with_guides(guides: Vec<CompGuide>) -> Comps {
-        Comps { state: CompsState::Ready(guides), rx: None, loaded_at: Some(Instant::now()) }
+    pub fn with_guides(guides: Vec<CompGuide>, archetypes: Vec<Archetype>) -> Comps {
+        Comps { state: CompsState::Ready(guides), rx: None, loaded_at: Some(Instant::now()), archetypes, archetypes_rx: None }
     }
 
     fn reload(&mut self) {
-        if self.rx.is_some() {
-            return;
+        if self.rx.is_none() {
+            self.rx = spawn_load(load_or_fetch);
         }
-        let (tx, rx) = channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(load_or_fetch().map_err(|e| format!("{e:#}")));
-        });
-        self.rx = Some(rx);
+        if self.archetypes_rx.is_none() {
+            self.archetypes_rx = spawn_load(enablers::load_or_fetch);
+        }
     }
 
     /// Collects a finished load. Returns true when the state changed.
     pub fn poll(&mut self) -> bool {
-        let Some(rx) = &self.rx else { return false };
-        let Ok(result) = rx.try_recv() else { return false };
+        let mut changed = false;
+        if let Some(Ok(result)) = self.archetypes_rx.as_ref().map(|rx| rx.try_recv()) {
+            self.archetypes_rx = None;
+            match result {
+                Ok(a) => {
+                    log::info!("hero enablers for {} comp archetypes", a.len());
+                    self.archetypes = a;
+                    changed = true;
+                }
+                // Keep the enablers we have; the guides work without them.
+                Err(e) => log::warn!("{e}"),
+            }
+        }
+        let Some(rx) = &self.rx else { return changed };
+        let Ok(result) = rx.try_recv() else { return changed };
         self.rx = None;
         match result {
             Ok(guides) => {
@@ -262,6 +287,16 @@ impl Comps {
 
     pub fn get(&self, id: i32) -> Option<&CompGuide> {
         self.guides().iter().find(|g| g.id == id)
+    }
+
+    /// Stats of the heroes that enable a comp; `None` while loading or when
+    /// nothing matches it.
+    pub fn enablers(&self, g: &CompGuide, db: &CardDb) -> Option<&Archetype> {
+        let ids = |dbfs: &[i32]| -> Vec<String> { dbfs.iter().filter_map(|&d| db.by_dbf(d)).map(|c| c.id.clone()).collect() };
+        let (core, addons) = (ids(&g.core_cards), ids(&g.addon_cards));
+        let core: Vec<&str> = core.iter().map(String::as_str).collect();
+        let addons: Vec<&str> = addons.iter().map(String::as_str).collect();
+        enablers::for_comp(&self.archetypes, g.tribe, &core, &addons).filter(|a| !a.heroes.is_empty())
     }
 }
 

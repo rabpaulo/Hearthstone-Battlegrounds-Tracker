@@ -590,6 +590,8 @@ pub struct CompRow {
     pub trend: i32,
     /// Tribe not in this lobby.
     pub dim: bool,
+    /// The player's hero enables this comp.
+    pub your_hero: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -601,6 +603,8 @@ pub enum CompItem {
     /// One wrapped line of guide text.
     Text { text: String, strong: bool },
     Card { card_id: String, name: String, tier: i32 },
+    /// A hero that enables the comp; `detail` sums up its stats.
+    Hero { card_id: String, name: String, detail: String, yours: bool },
     /// Loading, errors, nothing to show.
     Note(String),
     Gap,
@@ -613,7 +617,7 @@ impl CompItem {
             CompItem::Comp(_) => 36.0,
             CompItem::Heading(_) => 24.0,
             CompItem::Text { .. } => 16.0,
-            CompItem::Card { .. } => 27.0,
+            CompItem::Card { .. } | CompItem::Hero { .. } => 27.0,
             CompItem::Note(_) => 30.0,
             CompItem::Gap => 6.0,
         }
@@ -621,7 +625,7 @@ impl CompItem {
 
     /// Reacts to the pointer (highlight, click or card preview).
     pub fn hoverable(&self) -> bool {
-        matches!(self, CompItem::Comp(_) | CompItem::Card { .. })
+        matches!(self, CompItem::Comp(_) | CompItem::Card { .. } | CompItem::Hero { .. })
     }
 }
 
@@ -807,6 +811,9 @@ impl CompPanel {
                         c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
                         c.rect(x, ry, 3.0 * s, rh, GOLD);
                     }
+                    if row.your_hero {
+                        c.rect(x + iw - 3.0 * s, ry, 3.0 * s, rh, GOLD);
+                    }
                     let max = iw - 40.0 * s;
                     let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Bold, max);
                     ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, if row.dim { DIM } else { TEXT });
@@ -843,6 +850,23 @@ impl CompPanel {
                         c.circle(tx, cy, 8.5 * s, ACCENT);
                         ctx.label(c, &tier.to_string(), tx, cy, 11.0, Weight::Bold, TEXT, Align::Center);
                     }
+                }
+                CompItem::Hero { card_id, name, detail, yours } => {
+                    let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
+                    ctx.tile_row(c, card_id, x, ry, iw, rh, base);
+                    if *yours {
+                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                    }
+                    if hover {
+                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
+                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                    }
+                    let dw = ctx.fonts.measure(detail, 10.5 * s, Weight::Bold);
+                    let dx = x + iw - dw - 12.0 * s;
+                    c.rrect(dx - 6.0 * s, cy - 8.5 * s, dw + 12.0 * s, 17.0 * s, 8.5 * s, Rgba(0, 0, 0, 185));
+                    let name = ctx.fonts.fit(name, 12.0 * s, Weight::Medium, dx - x - 18.0 * s);
+                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, if *yours { GOLD } else { TEXT });
+                    ctx.label(c, detail, dx, cy, 10.5, Weight::Bold, TEXT, Align::Left);
                 }
                 CompItem::Note(text) => {
                     let text = ctx.fonts.fit(text, 11.5 * s, Weight::Medium, iw - 16.0 * s);
