@@ -176,12 +176,18 @@ function boardInfo(side, friendly) {
                 scriptDataNum1: tag(t, 'TAG_SCRIPT_DATA_NUM_1'),
                 scriptDataNum2: tag(t, 'TAG_SCRIPT_DATA_NUM_2'),
                 scriptDataNum6: tag(t, 'TAG_SCRIPT_DATA_NUM_6'),
+                tags: tagsByNumber(t),
             })),
+        // The Deity secret (BG_OldGod) keeps the god's dbfId in NUM_6 and its
+        // stats in NUM_2/NUM_3; without them the simulator awakens a 1/1 C'Thun.
         secrets: (side.secrets ?? []).map((s) => ({
             entityId: s.id,
             cardId: s.cardId,
             scriptDataNum1: tag(s, 'TAG_SCRIPT_DATA_NUM_1'),
             scriptDataNum2: tag(s, 'TAG_SCRIPT_DATA_NUM_2'),
+            scriptDataNum3: tag(s, 'TAG_SCRIPT_DATA_NUM_3'),
+            scriptDataNum6: tag(s, 'TAG_SCRIPT_DATA_NUM_6'),
+            tags: tagsByNumber(s),
         })),
         globalInfo,
         enchantments: (side.enchantments ?? []).map(enchantment),

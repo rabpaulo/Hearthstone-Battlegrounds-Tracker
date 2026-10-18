@@ -249,19 +249,18 @@ impl Layout {
         Rect::new(self.hs.x + self.px(6.0), y, size.0, size.1)
     }
 
-    /// Tallest the opponent popup may be.
-    pub fn popup_max_h(&self) -> i32 {
-        self.hs.h - 2 * self.px(8.0)
+    /// Tallest the opponent popup may be so it fits below the simulation panel.
+    pub fn popup_max_h(&self, sim_rect: Rect) -> i32 {
+        let y = sim_rect.y + sim_rect.h + self.px(6.0);
+        (self.hs.y + self.hs.h - y - self.px(8.0)).max(self.px(100.0))
     }
 
-    /// Right of the slot, centred on it; `keep_y` keeps a popup that is
-    /// already open from jumping when its toggled boards change.
-    pub fn popup(&self, slot: usize, size: (i32, i32), keep_y: Option<i32>) -> Rect {
-        let r = self.slot(slot);
-        let y = keep_y
-            .unwrap_or(r.y + r.h / 2 - size.1 / 2)
-            .clamp(self.hs.y + self.px(8.0), (self.hs.y + self.hs.h - size.1 - self.px(8.0)).max(self.hs.y));
-        Rect::new(r.x + r.w + self.px(12.0), y, size.0, size.1)
+    /// Top centre, directly below the combat simulation panel.
+    pub fn popup(&self, size: (i32, i32), sim_rect: Rect) -> Rect {
+        let mut x = sim_rect.x + (sim_rect.w - size.0) / 2;
+        x = x.clamp(self.hs.x + self.px(8.0), (self.hs.x + self.hs.w - size.0 - self.px(8.0)).max(self.hs.x));
+        let y = sim_rect.y + sim_rect.h + self.px(6.0);
+        Rect::new(x, y, size.0, size.1)
     }
 }
 
@@ -1491,9 +1490,24 @@ impl App {
         if !win.mapped {
             return None;
         }
+        if win.rect.contains(px, py) {
+            return Some(slot);
+        }
         let r = l.slot(slot);
-        let gap = Rect::new(r.x + r.w, r.y, win.rect.x - (r.x + r.w), r.h);
-        (win.rect.contains(px, py) || gap.contains(px, py)).then_some(slot)
+        let x1 = r.x + r.w;
+        let x2 = win.rect.x;
+        if x2 > x1 && px >= x1 && px <= x2 {
+            let t = (px - x1) as f32 / (x2 - x1) as f32;
+            let top = r.y as f32 + t * (win.rect.y as f32 - r.y as f32);
+            let bot = (r.y + r.h) as f32 + t * ((win.rect.y + win.rect.h) as f32 - (r.y + r.h) as f32);
+            let margin = l.px(24.0) as f32;
+            let min_y = (top.min(bot) - margin).min(win.rect.y as f32);
+            let max_y = top.max(bot) + margin;
+            if (py as f32) >= min_y && (py as f32) <= max_y {
+                return Some(slot);
+            }
+        }
+        None
     }
 
     /// Grabs the keyboard while the search field is focused and on screen,
@@ -1583,9 +1597,9 @@ impl App {
         let top_rect = layout.top_bar(top.size(s));
         // The settings button lives in the bar, so it shows whenever a game does.
         let show_top = in_game;
+        let sim_rect = layout.sim(sim.size(s), show_top.then_some(top_rect));
         if in_game && cfg.show_simulation && self.ov.game.turn() >= 1 {
-            let rect = layout.sim(sim.size(s), show_top.then_some(top_rect));
-            p.sim.update(x, rect, &sim, &mut ctx, |m, c, ctx| m.render(c, ctx));
+            p.sim.update(x, sim_rect, &sim, &mut ctx, |m, c, ctx| m.render(c, ctx));
         } else {
             p.sim.hide(x);
         }
@@ -1648,10 +1662,9 @@ impl App {
             _ => p.preview.hide(x),
         }
         match popup {
-            Some((slot, mut pm)) if in_game && cfg.show_opponent_boards => {
-                pm.fit(s, layout.popup_max_h());
-                let same = p.popup.win.mapped && p.popup.model().is_some_and(|m| m.place == pm.place);
-                let rect = layout.popup(slot, pm.size(s), same.then_some(p.popup.win.rect.y));
+            Some((_slot, mut pm)) if in_game && cfg.show_opponent_boards => {
+                pm.fit(s, layout.popup_max_h(sim_rect));
+                let rect = layout.popup(pm.size(s), sim_rect);
                 p.popup.update(x, rect, &pm, &mut ctx, |m, c, ctx| m.render(c, ctx));
             }
             _ => p.popup.hide(x),
@@ -1872,7 +1885,8 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     let sc = &mut screen;
     emit(sc, &mut ctx, out, "info", layout.info(info.size(s)), &|c, ctx| info.render(c, ctx))?;
     let top_rect = layout.top_bar(top.size(s));
-    emit(sc, &mut ctx, out, "sim", layout.sim(sim.size(s), Some(top_rect)), &|c, ctx| sim.render(c, ctx))?;
+    let sim_rect = layout.sim(sim.size(s), Some(top_rect));
+    emit(sc, &mut ctx, out, "sim", sim_rect, &|c, ctx| sim.render(c, ctx))?;
     emit(sc, &mut ctx, out, "top", top_rect, &|c, ctx| top.render(c, ctx))?;
     if let Some(l) = &list {
         let (tx, ty, max_h) = layout.tier_list(top_rect, (TierList::W * s).ceil() as i32);
@@ -1887,9 +1901,9 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
             }
         }
     }
-    if let (Some(mut p), Some(slot)) = (popup, ov.ui.slot_hover) {
-        p.fit(s, layout.popup_max_h());
-        emit(sc, &mut ctx, out, "popup", layout.popup(slot, p.size(s), None), &|c, ctx| p.render(c, ctx))?;
+    if let (Some(mut p), Some(_slot)) = (popup, ov.ui.slot_hover) {
+        p.fit(s, layout.popup_max_h(sim_rect));
+        emit(sc, &mut ctx, out, "popup", layout.popup(p.size(s), sim_rect), &|c, ctx| p.render(c, ctx))?;
     }
     screen.pixmap.save_png(out.join("screen.png"))?;
     Ok(())
@@ -2147,5 +2161,23 @@ mod tests {
         assert_eq!(titles(&ov), vec!["Beast", "Dragon"]);
         ov.ui.hide_unavailable = false;
         assert!(titles(&ov).iter().all(|t| t == "Beast" || t == "Dragon" || t.ends_with("not in lobby")));
+    }
+
+    #[test]
+    fn opponent_popup_placed_below_sim_panel() {
+        let hs = Rect::new(0, 0, 1920, 1080);
+        let cfg = Config::default();
+        let layout = Layout::new(hs, &cfg);
+        let sim_size = (340, 72);
+        let top_rect = layout.top_bar((300, 38));
+        let sim_rect = layout.sim(sim_size, Some(top_rect));
+        let popup_size = (496, 220);
+        let popup_rect = layout.popup(popup_size, sim_rect);
+
+        // Positioned in upper middle, directly below sim.
+        assert_eq!(popup_rect.y, sim_rect.y + sim_rect.h + layout.px(6.0));
+        assert_eq!(popup_rect.x + popup_rect.w / 2, sim_rect.x + sim_rect.w / 2);
+        assert!(layout.popup_max_h(sim_rect) > 0);
+        assert!(popup_rect.y + popup_rect.h < hs.h);
     }
 }

@@ -351,7 +351,7 @@ impl Game {
         };
         let mut player = self.side(local_pid, local_e, true);
         player.lobby_id = self.local_lobby_id();
-        let mut opponent = self.side(dummy_pid, dummy_e, false);
+        let mut opponent = self.side(dummy_pid, dummy_e, true);
         opponent.lobby_id = self.entities[&dummy_e].tag(tags::BACON_CURRENT_COMBAT_PLAYER_ID);
         let turn = self.turn();
         let seen = self.boards.entry(opponent.lobby_id).or_default();
@@ -414,7 +414,7 @@ impl Game {
             let raw = || self.raw(e, &attached);
             match (e.tag(tags::CARDTYPE), e.tag(tags::ZONE)) {
                 (card_type::MINION, zone::PLAY) => side.board.push(raw()),
-                (card_type::MINION, zone::HAND) if with_hand => side.hand.push(raw()),
+                (card_type::MINION, zone::HAND) if with_hand && !e.card_id.is_empty() => side.hand.push(raw()),
                 (card_type::HERO_POWER, zone::PLAY) => side.hero_powers.push(raw()),
                 (card_type::BATTLEGROUND_TRINKET, zone::PLAY) => side.trinkets.push(raw()),
                 (card_type::BATTLEGROUND_QUEST_REWARD, zone::PLAY) => side.quest_rewards.push(raw()),
@@ -657,6 +657,18 @@ mod tests {
                 "        tag=CARDTYPE value=ENCHANTMENT",
                 "        tag=ZONE value=PLAY",
                 "        tag=ATTACHED value=41",
+                "    FULL_ENTITY - Updating [entityName=HandM id=43 zone=HAND zonePos=1 cardId=BG32_330_G player=16] CardID=BG32_330_G",
+                "        tag=CONTROLLER value=16",
+                "        tag=CARDTYPE value=MINION",
+                "        tag=ZONE value=HAND",
+                "        tag=ZONE_POSITION value=1",
+                "        tag=ATK value=6",
+                "        tag=HEALTH value=6",
+                "    FULL_ENTITY - Updating [entityName=HiddenHand id=44 zone=HAND zonePos=2 cardId= player=16] CardID=",
+                "        tag=CONTROLLER value=16",
+                "        tag=CARDTYPE value=MINION",
+                "        tag=ZONE value=HAND",
+                "        tag=ZONE_POSITION value=2",
             ],
         );
         assert!(g.take_events().is_empty(), "snapshot must wait for the block to close");
@@ -670,6 +682,8 @@ mod tests {
         assert_eq!(snap.player.board.len(), 1);
         assert_eq!(snap.opponent.board[0].card_id, "BG36_345");
         assert_eq!(snap.opponent.board[0].enchantments[0].card_id, "ENCH");
+        assert_eq!(snap.opponent.hand.len(), 1);
+        assert_eq!(snap.opponent.hand[0].card_id, "BG32_330_G");
         // Combat minions are not shop offers.
         assert_eq!(g.shop_cards().len(), 1);
         assert_eq!(g.seen_board(5).unwrap().side.board.len(), 1);
