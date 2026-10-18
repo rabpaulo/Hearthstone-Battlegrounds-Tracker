@@ -16,6 +16,9 @@ pub struct Config {
     pub scale: f32,
     /// Panel colour theme; the settings panel switches it live.
     pub theme: ThemeName,
+    /// How card art is shown in lists, the opponent popup and hover
+    /// previews; the settings panel switches it live.
+    pub compact_mode: CompactMode,
     /// Combat simulations per fight.
     pub simulations: u32,
     /// Node.js executable used for the simulator.
@@ -61,12 +64,50 @@ impl Default for LeaderboardGeometry {
     }
 }
 
+/// How much card art the overlay draws: the full list strips, smaller
+/// thumbnails, or none at all. The settings panel switches it live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CompactMode {
+    #[default]
+    #[serde(alias = "full", alias = "Full", alias = "FULL")]
+    Full,
+    #[serde(alias = "small", alias = "Small", alias = "SMALL")]
+    Small,
+    #[serde(alias = "text", alias = "Text", alias = "TEXT", alias = "text-only", alias = "TextOnly")]
+    Text,
+}
+
+impl CompactMode {
+    /// Offered by the settings panel, in order.
+    pub const ALL: [CompactMode; 3] = [CompactMode::Full, CompactMode::Small, CompactMode::Text];
+
+    /// Name shown in the settings panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            CompactMode::Full => "Full picture",
+            CompactMode::Small => "Smaller pictures",
+            CompactMode::Text => "Text only",
+        }
+    }
+
+    /// The value read from and written to `config.toml`.
+    pub fn config_name(self) -> &'static str {
+        match self {
+            CompactMode::Full => "full",
+            CompactMode::Small => "small",
+            CompactMode::Text => "text",
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             hearthstone_dir: None,
             scale: 1.0,
             theme: ThemeName::default(),
+            compact_mode: CompactMode::default(),
             simulations: 8000,
             node: "node".into(),
             sidecar_dir: None,
@@ -97,13 +138,24 @@ impl Config {
 /// Writes the theme picked in the settings panel, keeping the rest of the
 /// file (comments, keys and sections).
 pub fn save_theme(path: &Path, name: ThemeName) -> Result<()> {
+    save_key(path, "theme", name.config_name())
+}
+
+/// Writes the compact mode picked in the settings panel, keeping the rest
+/// of the file (comments, keys and sections).
+pub fn save_compact_mode(path: &Path, mode: CompactMode) -> Result<()> {
+    save_key(path, "compact_mode", mode.config_name())
+}
+
+/// Rewrites one top-level key of the config file, preserving everything else.
+fn save_key(path: &Path, key: &str, value: &str) -> Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let current = match std::fs::read_to_string(&target) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
     };
-    let updated = set_top_level_key(&current, "theme", name.config_name());
+    let updated = set_top_level_key(&current, key, value);
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -161,6 +213,7 @@ mod tests {
         assert_eq!(c.leaderboard.spacing, LeaderboardGeometry::default().spacing);
         assert_eq!(c.simulations, 8000);
         assert_eq!(c.theme, ThemeName::Dark);
+        assert_eq!(c.compact_mode, CompactMode::Full);
     }
 
     #[test]
@@ -175,6 +228,19 @@ mod tests {
         for name in ThemeName::ALL {
             let text = format!("theme = \"{}\"\n", name.config_name());
             assert_eq!(toml::from_str::<Config>(&text).unwrap().theme, name);
+        }
+    }
+
+    #[test]
+    fn compact_mode_round_trips_through_the_config() {
+        let c: Config = toml::from_str("compact_mode = \"text-only\"\n").unwrap();
+        assert_eq!(c.compact_mode, CompactMode::Text);
+        let c2: Config = toml::from_str("compact_mode = \"Small\"\n").unwrap();
+        assert_eq!(c2.compact_mode, CompactMode::Small);
+        assert!(toml::from_str::<Config>("compact_mode = \"huge\"").is_err());
+        for mode in CompactMode::ALL {
+            let text = format!("compact_mode = \"{}\"\n", mode.config_name());
+            assert_eq!(toml::from_str::<Config>(&text).unwrap().compact_mode, mode);
         }
     }
 
@@ -230,6 +296,27 @@ mod tests {
             assert!(link.is_symlink(), "symlink must be preserved");
             assert_eq!(std::fs::read_to_string(&real).unwrap(), "theme = \"light\"\n");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_compact_mode_keeps_comments_and_other_keys() {
+        let dir = std::env::temp_dir().join(format!("hsbg-config-compact-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep me\ntheme = \"dark\"\ncompact_mode = \"full\"\nscale = 1.5\n").unwrap();
+        save_compact_mode(&path, CompactMode::Text).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# keep me\ntheme = \"dark\"\ncompact_mode = \"text\"\nscale = 1.5\n"
+        );
+        let c = Config::load(&path).unwrap();
+        assert_eq!((c.theme, c.compact_mode, c.scale), (ThemeName::Dark, CompactMode::Text, 1.5));
+        // A config that does not exist yet gets the key on its own.
+        let fresh = dir.join("sub/new.toml");
+        save_compact_mode(&fresh, CompactMode::Small).unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "compact_mode = \"small\"\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

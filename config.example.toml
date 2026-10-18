@@ -11,6 +11,11 @@ scale = 1.0
 # in the top bar switches it live and rewrites this key.
 theme = "dark"
 
+# How much card art is drawn in lists, the opponent popup and hover previews:
+# "full" (default), "small" (smaller thumbnails) or "text" (no pictures at
+# all, not even the hover preview). The settings button switches it live.
+compact_mode = "full"
+
 # Combat simulations per fight (more = steadier odds, slower).
 simulations = 8000
 

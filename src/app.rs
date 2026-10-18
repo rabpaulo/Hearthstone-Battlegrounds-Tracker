@@ -9,7 +9,7 @@ use x11rb::protocol::Event;
 
 use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe};
 use crate::comps::{CompGuide, Comps, CompsState};
-use crate::config::{self, Config, LeaderboardGeometry};
+use crate::config::{self, CompactMode, Config, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
 use crate::history::{self, GameRecord, History};
 use crate::images::{ImageKind, Images};
@@ -732,16 +732,20 @@ impl Overlay {
         cache.as_ref().map(|(_, _, ids)| ids.iter().filter_map(|id| self.db.get(id)).collect()).unwrap_or_default()
     }
 
+    /// Hover preview of a card; none in text mode, which shows no art.
+    fn card_preview(&self, card_id: String) -> Option<CardPreview> {
+        (self.cfg.compact_mode != CompactMode::Text)
+            .then(|| CardPreview { card_id, images_rev: self.images.revision(), compact: self.cfg.compact_mode })
+    }
+
     pub fn search_preview(&self, panel: &SearchPanel) -> Option<CardPreview> {
         let row = panel.row(self.ui.search_row_hover()?)?;
-        Some(CardPreview { card_id: row.card_id.clone(), images_rev: self.images.revision() })
+        self.card_preview(row.card_id.clone())
     }
 
     pub fn comp_preview(&self, panel: &CompPanel) -> Option<CardPreview> {
         match panel.item(self.ui.comp_item_hover()?)? {
-            CompItem::Card { card_id, .. } | CompItem::Hero { card_id, .. } => {
-                Some(CardPreview { card_id: card_id.clone(), images_rev: self.images.revision() })
-            }
+            CompItem::Card { card_id, .. } | CompItem::Hero { card_id, .. } => self.card_preview(card_id.clone()),
             _ => None,
         }
     }
@@ -771,11 +775,12 @@ impl Overlay {
         }
     }
 
-    /// The settings panel's model: the current theme and where a pick is
-    /// saved.
+    /// The settings panel's model: the current theme and compact mode, and
+    /// where a pick is saved.
     pub fn settings_panel(&self, config_path: &Path) -> SettingsPanel {
         SettingsPanel {
             theme: self.theme_name,
+            compact: self.cfg.compact_mode,
             config_path: short_home(config_path),
             save_error: self.ui.settings_error.clone(),
             hover: self.ui.settings_hover,
@@ -843,12 +848,13 @@ impl Overlay {
             hidden: 0,
             hover: self.ui.popup_hover,
             images_rev: self.images.revision(),
+            compact: self.cfg.compact_mode,
         })
     }
 
     pub fn preview(&self, list: &TierList) -> Option<CardPreview> {
         let row = list.row(self.ui.row_hover()?)?;
-        Some(CardPreview { card_id: row.card_id.clone(), images_rev: self.images.revision() })
+        self.card_preview(row.card_id.clone())
     }
 }
 
@@ -1029,7 +1035,8 @@ impl App {
         }
         // Search results then show their art straight from the disk cache
         // instead of downloading a strip per row while the player types.
-        if ov.cfg.show_search {
+        // Text mode draws no list art, so there is nothing to warm up.
+        if ov.cfg.show_search && ov.cfg.compact_mode != CompactMode::Text {
             ov.images.warm_cache(ImageKind::Tile, ov.db.searchable());
         }
         log::info!("compositor {}", if x.compositing { "detected: translucent panels" } else { "not detected: opaque panels" });
@@ -1227,6 +1234,22 @@ impl App {
         self.dirty = true;
     }
 
+    /// Applies a compact mode picked in the settings panel, live, and writes
+    /// it to the config; a failure is shown in the panel instead.
+    fn pick_compact_mode(&mut self, i: usize) {
+        let Some(mode) = CompactMode::ALL.get(i).copied() else { return };
+        if mode != self.ov.cfg.compact_mode {
+            self.ov.cfg.compact_mode = mode;
+            self.panels.invalidate_all();
+        }
+        self.ov.ui.settings_error = None;
+        if let Err(e) = config::save_compact_mode(&self.config_path, mode) {
+            log::warn!("could not save the compact mode: {e:#}");
+            self.ov.ui.settings_error = Some(e.to_string());
+        }
+        self.dirty = true;
+    }
+
     fn handle_x_events(&mut self) {
         let s = self.layout().map(|l| l.s).unwrap_or(1.0);
         while let Some(ev) = self.x.poll_event() {
@@ -1355,8 +1378,10 @@ impl App {
                 }
                 Event::ButtonPress(e) if e.event == self.panels.settings.win.id && e.detail == 1 => {
                     let hit = self.panels.settings.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
-                    if let Some(SettingsHit::Theme(i)) = hit {
-                        self.pick_theme(i);
+                    match hit {
+                        Some(SettingsHit::Theme(i)) => self.pick_theme(i),
+                        Some(SettingsHit::Compact(i)) => self.pick_compact_mode(i),
+                        None => {}
                     }
                     self.ov.ui.settings_hover = hit;
                 }
@@ -1563,28 +1588,32 @@ impl App {
                 let pv = search.as_ref().and_then(|p| self.ov.search_preview(p))?;
                 Some((pv, self.ov.ui.search_row_hover().unwrap_or(0)))
             });
-        // Hover previews then only need a decode, not a download.
-        if let Some(list) = &tiers {
-            for row in list.sections.iter().flat_map(|sec| &sec.rows) {
-                self.ov.images.prefetch(ImageKind::Render, &row.card_id);
-            }
-        }
-        if let Some(panel) = &comps {
-            for item in &panel.items {
-                if let CompItem::Card { card_id, .. } = item {
-                    self.ov.images.prefetch(ImageKind::Render, card_id);
+        // Hover previews then only need a decode, not a download. Text mode
+        // shows no previews at all, so it downloads no renders either.
+        if self.ov.cfg.compact_mode != CompactMode::Text {
+            if let Some(list) = &tiers {
+                for row in list.sections.iter().flat_map(|sec| &sec.rows) {
+                    self.ov.images.prefetch(ImageKind::Render, &row.card_id);
                 }
             }
-        }
-        // Only the best matches: the results change with every key.
-        if let Some(panel) = &search {
-            for row in panel.rows.iter().take(8) {
-                self.ov.images.prefetch(ImageKind::Render, &row.card_id);
+            if let Some(panel) = &comps {
+                for item in &panel.items {
+                    if let CompItem::Card { card_id, .. } = item {
+                        self.ov.images.prefetch(ImageKind::Render, card_id);
+                    }
+                }
+            }
+            // Only the best matches: the results change with every key.
+            if let Some(panel) = &search {
+                for row in panel.rows.iter().take(8) {
+                    self.ov.images.prefetch(ImageKind::Render, &row.card_id);
+                }
             }
         }
 
         let opaque = !self.x.compositing;
-        let mut ctx = Ctx { fonts: &mut self.ov.fonts, images: &mut self.ov.images, theme: self.ov.theme, s, opaque };
+        let mut ctx =
+            Ctx { fonts: &mut self.ov.fonts, images: &mut self.ov.images, theme: self.ov.theme, compact: self.ov.cfg.compact_mode, s, opaque };
         let x = &self.x;
         let p = &mut self.panels;
 
@@ -1753,6 +1782,8 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     let hs = Rect::new(0, 0, 1920, 1080);
     let layout = Layout::new(hs, &ov.cfg);
     let s = layout.s;
+    // Text mode draws no card art, so there is nothing to download.
+    let art = ov.cfg.compact_mode != CompactMode::Text;
     // Let image downloads finish.
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -1761,16 +1792,20 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         let mut pending = 0;
         let mut ids: Vec<(ImageKind, String)> = Vec::new();
         if let Some(l) = &list {
-            for sec in &l.sections {
-                ids.extend(sec.rows.iter().map(|r| (ImageKind::Tile, r.card_id.clone())));
+            if art {
+                for sec in &l.sections {
+                    ids.extend(sec.rows.iter().map(|r| (ImageKind::Tile, r.card_id.clone())));
+                }
             }
             if let Some(pv) = ov.preview(l) {
                 ids.push((ImageKind::Render, pv.card_id));
             }
         }
-        if let Some(p) = &popup {
-            ids.push((ImageKind::Tile, p.hero_card_id.clone()));
-            ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Portrait, m.card_id.clone())));
+        if art {
+            if let Some(p) = &popup {
+                ids.push((ImageKind::Tile, p.hero_card_id.clone()));
+                ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Portrait, m.card_id.clone())));
+            }
         }
         for (kind, id) in &ids {
             if ov.images.get(*kind, id).is_none() {
@@ -1842,9 +1877,9 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     ov.ui.search_category = Some(Category::Hero);
     search_panels.extend(ov.search_panel().map(|p| ("search-heroes", p)));
     ov.ui.search_open = false;
-    // Settings: the theme list, second row under the pointer.
+    // Settings: the compact mode list, second row under the pointer.
     ov.ui.settings_open = true;
-    ov.ui.settings_hover = Some(SettingsHit::Theme(1));
+    ov.ui.settings_hover = Some(SettingsHit::Compact(1));
     let settings = ov.settings_panel(&crate::paths::config_path());
     ov.ui.settings_open = false;
     ov.ui.settings_hover = None;
@@ -1859,11 +1894,15 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         .chain(search_panels.iter().flat_map(|(_, p)| p.rows.iter().take(25).map(|r| r.card_id.clone())))
         .collect();
     let deadline = Instant::now() + Duration::from_secs(20);
-    while ids.iter().filter(|id| ov.images.get(ImageKind::Tile, id).is_none()).count() > 0 && Instant::now() < deadline {
+    while art
+        && ids.iter().filter(|id| ov.images.get(ImageKind::Tile, id).is_none()).count() > 0
+        && Instant::now() < deadline
+    {
         std::thread::sleep(Duration::from_millis(100));
         ov.images.poll();
     }
-    let mut ctx = Ctx { fonts: &mut ov.fonts, images: &mut ov.images, theme: ov.theme, s, opaque: false };
+    let mut ctx =
+        Ctx { fonts: &mut ov.fonts, images: &mut ov.images, theme: ov.theme, compact: ov.cfg.compact_mode, s, opaque: false };
     for (name, l) in &variants {
         let (w, h) = l.size(s, (hs.h as f32 * 0.85) as i32);
         let mut scratch = Canvas::new(w, h);

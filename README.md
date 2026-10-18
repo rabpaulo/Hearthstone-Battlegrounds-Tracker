@@ -10,7 +10,7 @@ só para as tribos da lobby, um campo da memória do cliente.
 |---|---|---|
 | Chances do combate | topo, centro | Letal / Vitória / Empate / Derrota / Letal, simuladas no início de cada combate (fica esmaecido na loja mostrando o último combate) |
 | Turno + tiers | topo, direita | Turno atual, botão de ajustes e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
-| Ajustes | botão de sliders no topo | Tema dos painéis: escuro, claro ou alto contraste. Troca na hora e grava a escolha no config |
+| Ajustes | botão de sliders no topo | Tema dos painéis: escuro, claro ou alto contraste. E o modo compacto: arte cheia, miniaturas menores ou só texto. Troca na hora e grava a escolha no config |
 | Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
 | Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
@@ -169,6 +169,15 @@ O tema dos painéis vem de `theme` (`"dark"`, `"light"` ou
 barra do topo: a escolha é aplicada na hora e reescrita no config, mantendo
 comentários e as outras chaves. O alto contraste usa fundo preto e cores
 vivas, com vitória em azul e derrota em laranja para quem tem daltonismo.
+
+`compact_mode` (`"full"`, `"small"` ou `"text"`) decide quanta arte de carta
+aparece nas listas, no tabuleiro do oponente e nas pré-visualizações de
+hover: `"full"` (padrão) tira a tira de arte de cada linha, `"small"` usa
+miniaturas menores (retratos menores no popup, carta mais estreita no
+hover), e `"text"` não desenha imagem nenhuma — linhas só com nome, o
+tabuleiro do oponente com gemas de ataque/vida e letras de palavra-chave, e
+sem pré-visualização no hover. No modo texto o overlay não baixa imagem
+alguma. Também dá para trocar ao vivo pelo botão de ajustes.
 
 ## Ferramentas de diagnóstico
 

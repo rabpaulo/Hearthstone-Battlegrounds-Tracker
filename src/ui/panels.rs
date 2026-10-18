@@ -7,6 +7,7 @@
 use super::draw::{Align, Canvas, Fonts, Rgba, Weight};
 use super::theme::{Theme, ThemeName};
 use crate::cards::{Category, Tribe, KEYWORDS};
+use crate::config::CompactMode;
 use crate::images::{ImageKind, Images};
 
 pub fn tribe_color(t: Tribe) -> Rgba {
@@ -30,6 +31,8 @@ pub struct Ctx<'a> {
     pub images: &'a mut Images,
     /// Colours every panel draws with; the settings panel switches them.
     pub theme: Theme,
+    /// How much card art is drawn; the settings panel switches it.
+    pub compact: CompactMode,
     pub s: f32,
     /// No compositor: paint opaque, square panels.
     pub opaque: bool,
@@ -86,12 +89,20 @@ impl Ctx<'_> {
         }
     }
 
-    /// A list row with the card's tile art fading in from the right.
+    /// A list row with the card's tile art fading in from the right. The
+    /// compact mode halves the art, or drops it altogether.
     #[allow(clippy::too_many_arguments)]
     fn tile_row(&mut self, c: &mut Canvas, card_id: &str, x: f32, y: f32, w: f32, h: f32, base: Rgba) {
         c.rect(x, y, w, h, base);
+        if self.compact == CompactMode::Text {
+            return;
+        }
         if let Some(img) = self.images.get(ImageKind::Tile, card_id) {
-            let tw = (h * img.width() as f32 / img.height() as f32).min(w * 0.7);
+            let cap = match self.compact {
+                CompactMode::Small => 0.35,
+                _ => 0.7,
+            };
+            let tw = (h * img.width() as f32 / img.height() as f32).min(w * cap);
             let tx = x + w - tw;
             c.image_cover(&img, tx, y, tw, h, 0.0, 1.0);
             c.hgradient(tx - 1.0, y, tw * 0.55, h, base, base.alpha(0));
@@ -1455,10 +1466,11 @@ pub struct OpponentPopup {
     /// Chip under the pointer.
     pub hover: Option<usize>,
     pub images_rev: u64,
+    /// How the minion portraits are drawn; shrinks the whole board.
+    pub compact: CompactMode,
 }
 
 impl OpponentPopup {
-    const W: f32 = Self::PAD * 2.0 + Self::SLOTS as f32 * Self::MINION_W + (Self::SLOTS - 1) as f32 * Self::MINION_GAP;
     const HEAD: f32 = 52.0;
     const CHIP_COLS: usize = 10;
     const CHIP_H: f32 = 20.0;
@@ -1466,14 +1478,42 @@ impl OpponentPopup {
     const BOARD_HEAD: f32 = 22.0;
     /// A board laid out like in game: up to seven minions side by side.
     const SLOTS: usize = 7;
-    const MINION_W: f32 = 64.0;
     const MINION_GAP: f32 = 6.0;
-    const PORTRAIT_H: f32 = 82.0;
-    /// Portrait, the stat gems hanging below it and a two-line name.
-    const MINIONS_H: f32 = 8.0 + Self::PORTRAIT_H + 8.0 + 24.0;
+    /// Portrait width at the full size; the other modes scale off it.
+    const MINION_W: f32 = 64.0;
     const ROW: f32 = 32.0;
     const MORE: f32 = 20.0;
     const PAD: f32 = 6.0;
+
+    /// Width of one minion slot; text mode keeps it for the name and gems.
+    fn minion_w(&self) -> f32 {
+        match self.compact {
+            CompactMode::Small => 40.0,
+            _ => Self::MINION_W,
+        }
+    }
+
+    /// Height of a minion portrait; none in text mode.
+    fn portrait_h(&self) -> f32 {
+        match self.compact {
+            CompactMode::Small => 50.0,
+            CompactMode::Text => 0.0,
+            CompactMode::Full => 82.0,
+        }
+    }
+
+    /// Portrait, the stat gems hanging below it and a two-line name; in text
+    /// mode the gems and name alone, without any art.
+    fn minions_h(&self) -> f32 {
+        match self.compact {
+            CompactMode::Text => 6.0 + 48.0,
+            _ => 8.0 + self.portrait_h() + 8.0 + 24.0,
+        }
+    }
+
+    fn w(&self) -> f32 {
+        Self::PAD * 2.0 + Self::SLOTS as f32 * self.minion_w() + (Self::SLOTS - 1) as f32 * Self::MINION_GAP
+    }
 
     fn chips_h(&self) -> f32 {
         if self.boards.is_empty() {
@@ -1482,8 +1522,8 @@ impl OpponentPopup {
         self.boards.len().div_ceil(Self::CHIP_COLS) as f32 * (Self::CHIP_H + Self::GAP) + Self::GAP
     }
 
-    fn chip_box(i: usize) -> Box2 {
-        let inner = Self::W - 2.0 * Self::PAD;
+    fn chip_box(&self, i: usize) -> Box2 {
+        let inner = self.w() - 2.0 * Self::PAD;
         let cw = (inner - Self::GAP * (Self::CHIP_COLS - 1) as f32) / Self::CHIP_COLS as f32;
         let (col, row) = (i % Self::CHIP_COLS, i / Self::CHIP_COLS);
         Box2 {
@@ -1500,12 +1540,12 @@ impl OpponentPopup {
         self.boards.iter().enumerate().filter(|(i, _)| self.shown[*i]).take(on.saturating_sub(self.hidden))
     }
 
-    fn board_h(b: &BoardView) -> f32 {
-        Self::BOARD_HEAD + if b.minions.is_empty() { Self::ROW } else { Self::MINIONS_H }
+    fn board_h(&self, b: &BoardView) -> f32 {
+        Self::BOARD_HEAD + if b.minions.is_empty() { Self::ROW } else { self.minions_h() }
     }
 
     fn content_h(&self) -> f32 {
-        let boards = self.visible().map(|(_, b)| Self::board_h(b)).sum::<f32>();
+        let boards = self.visible().map(|(_, b)| self.board_h(b)).sum::<f32>();
         // Nothing toggled on: room for the hint.
         let boards = if boards > 0.0 { boards } else { Self::ROW };
         let more = if self.hidden > 0 { Self::MORE } else { 0.0 };
@@ -1521,12 +1561,12 @@ impl OpponentPopup {
     }
 
     pub fn size(&self, s: f32) -> (i32, i32) {
-        (s_ceil(Self::W, s), s_ceil(self.content_h(), s))
+        (s_ceil(self.w(), s), s_ceil(self.content_h(), s))
     }
 
     /// Turn chip at a point.
     pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<usize> {
-        (0..self.boards.len()).find(|&i| Self::chip_box(i).contains(x / s, y / s))
+        (0..self.boards.len()).find(|&i| self.chip_box(i).contains(x / s, y / s))
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1573,7 +1613,7 @@ impl OpponentPopup {
         let s = ctx.s;
         let t = ctx.theme;
         for (i, b) in self.boards.iter().enumerate() {
-            let (cx, cy, cw, ch) = Self::chip_box(i).scaled(s);
+            let (cx, cy, cw, ch) = self.chip_box(i).scaled(s);
             let on = self.shown[i];
             let hover = self.hover == Some(i);
             let fill = match (on, hover) {
@@ -1626,29 +1666,88 @@ impl OpponentPopup {
             return y + Self::ROW * s;
         }
         // Centred like the game centres a board that is not full.
+        let mw = self.minion_w();
         let n = b.minions.len().min(Self::SLOTS) as f32;
-        let row_w = n * Self::MINION_W + (n - 1.0) * Self::MINION_GAP;
-        let x0 = (Self::W - row_w) / 2.0;
+        let row_w = n * mw + (n - 1.0) * Self::MINION_GAP;
+        let x0 = (self.w() - row_w) / 2.0;
+        let top = if self.compact == CompactMode::Text { 6.0 } else { 8.0 };
         for (i, m) in b.minions.iter().take(Self::SLOTS).enumerate() {
-            let mx = (x0 + i as f32 * (Self::MINION_W + Self::MINION_GAP)) * s;
-            Self::render_minion(c, ctx, m, mx, y + 8.0 * s);
+            let mx = (x0 + i as f32 * (mw + Self::MINION_GAP)) * s;
+            self.render_minion(c, ctx, m, mx, y + top * s);
         }
-        y + Self::MINIONS_H * s
+        y + self.minions_h() * s
     }
 
     /// One minion as on the game board: portrait, attack bottom left,
-    /// health bottom right, keyword effects around it, name below.
-    fn render_minion(c: &mut Canvas, ctx: &mut Ctx, m: &MinionView, x: f32, y: f32) {
+    /// health bottom right, keyword effects around it, name below. Text mode
+    /// keeps the stats, keywords and name but drops the art entirely.
+    fn render_minion(&self, c: &mut Canvas, ctx: &mut Ctx, m: &MinionView, x: f32, y: f32) {
         let s = ctx.s;
         let t = ctx.theme;
-        let (w, h) = (Self::MINION_W * s, Self::PORTRAIT_H * s);
-        let r = w / 2.0;
+        let mw = self.minion_w();
         let has = |k: &str| m.keywords.contains(&k);
+        // Letters for the keywords: every one of them in text mode (there is
+        // no art to hint at them), only the ones without a look otherwise.
+        let letters: &[(&str, &str, Rgba)] = if self.compact == CompactMode::Text {
+            &[
+                ("Taunt", "T", Rgba(132, 136, 148, 255)),
+                ("Shield", "D", Rgba(255, 214, 90, 255)),
+                ("Reborn", "R", Rgba(110, 220, 255, 255)),
+                ("Stealth", "S", Rgba(120, 90, 180, 255)),
+                ("Venomous", "V", Rgba(70, 170, 60, 255)),
+                ("Windfury", "W", Rgba(70, 150, 220, 255)),
+                ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
+            ]
+        } else {
+            &[
+                ("Venomous", "V", Rgba(70, 170, 60, 255)),
+                ("Windfury", "W", Rgba(70, 150, 220, 255)),
+                ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
+            ]
+        };
+        let badges: Vec<(&str, Rgba)> =
+            letters.iter().filter(|(k, ..)| has(k)).map(|(_, l, col)| (*l, *col)).collect();
+        if self.compact == CompactMode::Text {
+            let (w, h) = (mw * s, 58.0 * s);
+            let r = 5.0 * s;
+            c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
+            let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
+            c.stroke_rrect(x, y, w, h, r, 1.0, frame);
+            // Gems at the top corners, where the game hangs them.
+            let gy = y + 12.0 * s;
+            for (cx, value, color) in [(x + 10.0 * s, m.attack, t.attack), (x + w - 10.0 * s, m.health, t.health)] {
+                c.circle(cx, gy, 8.5 * s, Rgba(0, 0, 0, 220));
+                c.circle(cx, gy, 7.0 * s, color);
+                let text = value.to_string();
+                let px = if text.len() >= 3 { 8.0 } else { 10.0 };
+                c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
+            }
+            // Keyword letters on their own row under the gems.
+            let bw = 11.0 * s;
+            let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
+            for (i, (label, col)) in badges.iter().enumerate() {
+                let (cx, cy) = (bx0 + i as f32 * bw, y + 27.0 * s);
+                c.circle(cx, cy, 4.5 * s, Rgba(0, 0, 0, 200));
+                c.circle(cx, cy, 3.5 * s, *col);
+                ctx.label(c, label, cx, cy, 7.0, Weight::Bold, t.on_accent, Align::Center);
+            }
+            let lines = ctx.fonts.wrap(&m.name, 9.0 * s, Weight::Bold, w - 4.0 * s);
+            let name_color = if m.golden { t.gold } else { t.text };
+            for (i, line) in lines.iter().take(2).enumerate() {
+                let cy = y + 41.0 * s + i as f32 * 10.0 * s;
+                ctx.label(c, line, x + w / 2.0, cy, 9.0, Weight::Bold, name_color, Align::Center);
+            }
+            return;
+        }
+        let (w, h) = (mw * s, self.portrait_h() * s);
+        let r = w / 2.0;
+        // Everything around the art shrinks with it in "small" mode.
+        let k = mw / Self::MINION_W;
         if has("Taunt") {
             // Stone shield behind the portrait.
-            let (tx, ty, tw, th) = (x - 4.0 * s, y - 3.0 * s, w + 8.0 * s, h + 5.0 * s);
-            c.rrect(tx, ty, tw, th, 12.0 * s, Rgba(132, 136, 148, 255));
-            c.stroke_rrect(tx, ty, tw, th, 12.0 * s, 1.5 * s, Rgba(60, 62, 72, 255));
+            let (tx, ty, tw, th) = (x - 4.0 * k * s, y - 3.0 * k * s, w + 8.0 * k * s, h + 5.0 * k * s);
+            c.rrect(tx, ty, tw, th, 12.0 * k * s, Rgba(132, 136, 148, 255));
+            c.stroke_rrect(tx, ty, tw, th, 12.0 * k * s, 1.5 * s, Rgba(60, 62, 72, 255));
         }
         c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
         if let Some(img) = ctx.images.get(ImageKind::Portrait, &m.card_id) {
@@ -1663,47 +1762,45 @@ impl OpponentPopup {
             c.rrect(x, y, w, h, r, Rgba(110, 220, 255, 60));
         }
         let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
-        c.stroke_rrect(x, y, w, h, r, 2.0 * s, frame);
+        c.stroke_rrect(x, y, w, h, r, 2.0 * k * s, frame);
         if has("Shield") {
-            c.stroke_rrect(x - 2.5 * s, y - 2.5 * s, w + 5.0 * s, h + 5.0 * s, r + 2.5 * s, 3.0 * s, Rgba(255, 214, 90, 210));
+            c.stroke_rrect(
+                x - 2.5 * k * s,
+                y - 2.5 * k * s,
+                w + 5.0 * k * s,
+                h + 5.0 * k * s,
+                r + 2.5 * k * s,
+                3.0 * k * s,
+                Rgba(255, 214, 90, 210),
+            );
         }
-        // Small badges along the top for keywords without a look of their own.
-        let badges: Vec<(&str, Rgba)> = [
-            ("Venomous", "V", Rgba(70, 170, 60, 255)),
-            ("Windfury", "W", Rgba(70, 150, 220, 255)),
-            ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
-        ]
-        .into_iter()
-        .filter(|(k, ..)| has(k))
-        .map(|(_, l, col)| (l, col))
-        .collect();
-        let bw = 14.0 * s;
+        let bw = 14.0 * k * s;
         let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
         for (i, (label, col)) in badges.iter().enumerate() {
-            let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * s);
-            c.circle(cx, cy, 6.5 * s, Rgba(0, 0, 0, 200));
-            c.circle(cx, cy, 5.5 * s, *col);
-            ctx.label(c, label, cx, cy, 8.0, Weight::Bold, t.on_accent, Align::Center);
+            let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * k * s);
+            c.circle(cx, cy, 6.5 * k * s, Rgba(0, 0, 0, 200));
+            c.circle(cx, cy, 5.5 * k * s, *col);
+            ctx.label(c, label, cx, cy, (8.0 * k).max(7.0), Weight::Bold, t.on_accent, Align::Center);
         }
         // Stats where the game puts them.
-        let gy = y + h - 6.0 * s;
-        for (cx, value, color) in [(x + 9.0 * s, m.attack, t.attack), (x + w - 9.0 * s, m.health, t.health)] {
-            c.circle(cx, gy, 11.5 * s, Rgba(0, 0, 0, 220));
-            c.circle(cx, gy, 10.0 * s, color);
+        let gy = y + h - 6.0 * k * s;
+        for (cx, value, color) in [(x + 9.0 * k * s, m.attack, t.attack), (x + w - 9.0 * k * s, m.health, t.health)] {
+            c.circle(cx, gy, 11.5 * k * s, Rgba(0, 0, 0, 220));
+            c.circle(cx, gy, 10.0 * k * s, color);
             let text = value.to_string();
             let px = match text.len() {
                 1 | 2 => 12.5,
                 3 => 10.0,
                 _ => 8.5,
-            };
+            } * k;
             // The gems are always bright, so their number keeps a dark shadow.
             c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
         }
-        let lines = ctx.fonts.wrap(&m.name, 9.5 * s, Weight::Bold, w + Self::MINION_GAP * s - 2.0 * s);
+        let lines = ctx.fonts.wrap(&m.name, 9.5 * k * s, Weight::Bold, w + Self::MINION_GAP * k * s - 2.0 * s);
         let name_color = if m.golden { t.gold } else { t.text };
         for (i, line) in lines.iter().take(2).enumerate() {
-            let cy = y + h + 15.0 * s + i as f32 * 11.0 * s;
-            ctx.label(c, line, x + w / 2.0, cy, 9.5, Weight::Bold, name_color, Align::Center);
+            let cy = y + h + (15.0 + i as f32 * 11.0) * k * s;
+            ctx.label(c, line, x + w / 2.0, cy, 9.5 * k, Weight::Bold, name_color, Align::Center);
         }
     }
 }
@@ -1714,15 +1811,23 @@ impl OpponentPopup {
 pub struct CardPreview {
     pub card_id: String,
     pub images_rev: u64,
+    /// "Small" mode shows a narrower card; text mode never builds a preview.
+    pub compact: CompactMode,
 }
 
 impl CardPreview {
-    const W: f32 = 230.0;
+    /// Preview width; the height follows the card's aspect ratio.
+    fn w(&self) -> f32 {
+        match self.compact {
+            CompactMode::Small => 150.0,
+            _ => 230.0,
+        }
+    }
 
     /// Size once the image has loaded.
     pub fn size(&self, s: f32, images: &mut Images) -> Option<(i32, i32)> {
         let img = images.get(ImageKind::Render, &self.card_id)?;
-        let w = Self::W * s;
+        let w = self.w() * s;
         Some((w.ceil() as i32, (w * img.height() as f32 / img.width() as f32).ceil() as i32))
     }
 
@@ -1764,12 +1869,16 @@ impl Calibration {
 pub enum SettingsHit {
     /// A theme row; index into `ThemeName::ALL`.
     Theme(usize),
+    /// A compact mode row; index into `CompactMode::ALL`.
+    Compact(usize),
 }
 
-/// In-overlay settings: the theme, applied and saved as soon as it is picked.
+/// In-overlay settings: the theme and the compact mode, applied and saved as
+/// soon as they are picked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsPanel {
     pub theme: ThemeName,
+    pub compact: CompactMode,
     /// Where the choice is written, shown in the footer.
     pub config_path: String,
     /// The last save failed; shown instead of the path.
@@ -1784,31 +1893,51 @@ impl SettingsPanel {
     const ROW: f32 = 38.0;
     const FOOT: f32 = 30.0;
     const PAD: f32 = 4.0;
-    /// Miniature of a palette at the left of its row.
+    /// Miniature of a palette, or of a list row, at the left of its row.
     const SWATCH_W: f32 = 44.0;
     const SWATCH_H: f32 = 24.0;
 
     fn content_h(&self) -> f32 {
-        Self::TITLE + Self::HEADING + ThemeName::ALL.len() as f32 * Self::ROW + Self::FOOT + Self::PAD
+        Self::TITLE
+            + Self::HEADING
+            + ThemeName::ALL.len() as f32 * Self::ROW
+            + Self::HEADING
+            + CompactMode::ALL.len() as f32 * Self::ROW
+            + Self::FOOT
+            + Self::PAD
     }
 
     pub fn size(&self, s: f32, max_h: i32) -> (i32, i32) {
         (s_ceil(Self::W, s), s_ceil(self.content_h(), s).min(max_h))
     }
 
-    fn row_box(i: usize) -> Box2 {
-        Box2 {
-            x: Self::PAD + 2.0,
-            y: Self::TITLE + Self::HEADING + i as f32 * Self::ROW,
-            w: Self::W - 2.0 * Self::PAD - 4.0,
-            h: Self::ROW,
-        }
+    fn theme_row_top() -> f32 {
+        Self::TITLE + Self::HEADING
     }
 
-    /// Theme row under a window-local point.
+    fn compact_heading_top() -> f32 {
+        Self::theme_row_top() + ThemeName::ALL.len() as f32 * Self::ROW
+    }
+
+    fn compact_row_top() -> f32 {
+        Self::compact_heading_top() + Self::HEADING
+    }
+
+    fn row_box(y0: f32, i: usize) -> Box2 {
+        Box2 { x: Self::PAD + 2.0, y: y0 + i as f32 * Self::ROW, w: Self::W - 2.0 * Self::PAD - 4.0, h: Self::ROW }
+    }
+
+    /// Row under a window-local point.
     pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<SettingsHit> {
         let (ux, uy) = (x / s, y / s);
-        (0..ThemeName::ALL.len()).find(|&i| Self::row_box(i).contains(ux, uy)).map(SettingsHit::Theme)
+        (0..ThemeName::ALL.len())
+            .find(|&i| Self::row_box(Self::theme_row_top(), i).contains(ux, uy))
+            .map(SettingsHit::Theme)
+            .or_else(|| {
+                (0..CompactMode::ALL.len())
+                    .find(|&i| Self::row_box(Self::compact_row_top(), i).contains(ux, uy))
+                    .map(SettingsHit::Compact)
+            })
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1818,11 +1947,24 @@ impl SettingsPanel {
         let x = (Self::PAD + 2.0) * s;
         let w = c.width() - 2.0 * x;
         ctx.label(c, "Settings", 12.0 * s, 15.0 * s, 14.0, Weight::Bold, t.gold, Align::Left);
-        let sub = ctx.fonts.fit("Click a theme to switch right away", 10.0 * s, Weight::Medium, w - 12.0 * s);
+        let sub = ctx.fonts.fit("Click a row to switch and save right away", 10.0 * s, Weight::Medium, w - 12.0 * s);
         ctx.label(c, &sub, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
-        ctx.label(c, "THEME", x + 6.0 * s, (Self::TITLE + Self::HEADING / 2.0) * s, 10.0, Weight::Bold, t.dim, Align::Left);
+        ctx.label(c, "THEME", x + 6.0 * s, (Self::theme_row_top() - Self::HEADING / 2.0) * s, 10.0, Weight::Bold, t.dim, Align::Left);
         for (i, name) in ThemeName::ALL.iter().enumerate() {
             self.render_theme_row(c, ctx, i, *name);
+        }
+        ctx.label(
+            c,
+            "COMPACT MODE",
+            x + 6.0 * s,
+            (Self::compact_row_top() - Self::HEADING / 2.0) * s,
+            10.0,
+            Weight::Bold,
+            t.dim,
+            Align::Left,
+        );
+        for (i, mode) in CompactMode::ALL.iter().enumerate() {
+            self.render_compact_row(c, ctx, i, *mode);
         }
         // Footer: where the choice went, or why it did not.
         let (text, color) = match &self.save_error {
@@ -1830,7 +1972,7 @@ impl SettingsPanel {
             None => (format!("Saved to {}", self.config_path), t.dim),
         };
         let text = ctx.fonts.fit(&text, 10.0 * s, Weight::Medium, w);
-        let fy = (Self::TITLE + Self::HEADING + ThemeName::ALL.len() as f32 * Self::ROW + Self::FOOT / 2.0) * s;
+        let fy = (Self::compact_row_top() + CompactMode::ALL.len() as f32 * Self::ROW + Self::FOOT / 2.0) * s;
         ctx.label(c, &text, c.width() / 2.0, fy, 10.0, Weight::Medium, color, Align::Center);
     }
 
@@ -1839,7 +1981,7 @@ impl SettingsPanel {
     fn render_theme_row(&self, c: &mut Canvas, ctx: &mut Ctx, i: usize, name: ThemeName) {
         let s = ctx.s;
         let t = ctx.theme;
-        let (x, y, w, _) = Self::row_box(i).scaled(s);
+        let (x, y, w, _) = Self::row_box(Self::theme_row_top(), i).scaled(s);
         let selected = self.theme == name;
         let hover = self.hover == Some(SettingsHit::Theme(i));
         let fill = if hover { t.button_hover } else { t.button };
@@ -1862,6 +2004,39 @@ impl SettingsPanel {
         let label = ctx.fonts.fit(name.label(), 12.5 * s, Weight::Bold, x + w - (sx + sw) - 12.0 * s);
         ctx.label(c, &label, sx + sw + 8.0 * s, y + Self::ROW * s / 2.0, 12.5, Weight::Bold, color, Align::Left);
     }
+
+    /// One compact mode row: a miniature of a list row showing how much art
+    /// it keeps, its name, and an accent bar when it is the active one.
+    fn render_compact_row(&self, c: &mut Canvas, ctx: &mut Ctx, i: usize, mode: CompactMode) {
+        let s = ctx.s;
+        let t = ctx.theme;
+        let (x, y, w, _) = Self::row_box(Self::compact_row_top(), i).scaled(s);
+        let selected = self.compact == mode;
+        let hover = self.hover == Some(SettingsHit::Compact(i));
+        let fill = if hover { t.button_hover } else { t.button };
+        c.rrect(x, y + 1.0 * s, w, (Self::ROW - 2.0) * s, 5.0 * s, fill);
+        if selected {
+            c.rrect(x, y + 1.0 * s, 4.0 * s, (Self::ROW - 2.0) * s, 2.0 * s, t.accent);
+        }
+        // A miniature list row: base, a text line, and art filling the rest.
+        let (sx, sy) = (x + 10.0 * s, y + (Self::ROW - Self::SWATCH_H) / 2.0 * s);
+        let (sw, sh) = (Self::SWATCH_W * s, Self::SWATCH_H * s);
+        c.rrect(sx, sy, sw, sh, 4.0 * s, t.row);
+        c.stroke_rrect(sx, sy, sw, sh, 4.0 * s, 1.0, t.border);
+        let art = match mode {
+            CompactMode::Full => 24.0,
+            CompactMode::Small => 11.0,
+            CompactMode::Text => 0.0,
+        } * s;
+        if art > 0.0 {
+            c.rrect(sx + sw - art - 2.0 * s, sy + 2.0 * s, art, sh - 4.0 * s, 3.0 * s, t.accent);
+        }
+        let line_w = (sw - art - 12.0 * s).max(8.0 * s);
+        c.rrect(sx + 5.0 * s, sy + (sh - 4.0 * s) / 2.0, line_w, 4.0 * s, 2.0 * s, t.soft);
+        let color = if selected || hover { t.text } else { t.soft };
+        let label = ctx.fonts.fit(mode.label(), 12.5 * s, Weight::Bold, x + w - (sx + sw) - 12.0 * s);
+        ctx.label(c, &label, sx + sw + 8.0 * s, y + Self::ROW * s / 2.0, 12.5, Weight::Bold, color, Align::Left);
+    }
 }
 
 #[cfg(test)]
@@ -1881,6 +2056,7 @@ mod tests {
             hidden: 0,
             hover: None,
             images_rev: 0,
+            compact: CompactMode::Full,
         }
     }
 
@@ -1908,7 +2084,7 @@ mod tests {
     fn popup_shows_only_toggled_boards() {
         let p = popup(vec![board(9), board(6), board(3)], vec![false, false, true]);
         assert_eq!(p.visible().map(|(i, b)| (i, b.turn)).collect::<Vec<_>>(), [(2, 3)]);
-        let (x, y, w, h) = OpponentPopup::chip_box(1).scaled(2.0);
+        let (x, y, w, h) = p.chip_box(1).scaled(2.0);
         assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(1));
         assert_eq!(p.hit(1.0, 1.0, 2.0), None);
         // Nothing toggled on: room for the hint.
@@ -1916,9 +2092,25 @@ mod tests {
         assert!(none.size(1.0).1 > 0);
     }
 
+    #[test]
+    fn popup_shrinks_with_the_compact_mode() {
+        let mut p = popup(vec![board(9), board(6)], vec![true; 2]);
+        let (full_w, full_h) = p.size(1.0);
+        p.compact = CompactMode::Small;
+        let (small_w, small_h) = p.size(1.0);
+        p.compact = CompactMode::Text;
+        let (text_w, text_h) = p.size(1.0);
+        assert!(small_w < full_w && text_w <= full_w, "smaller modes narrow the popup");
+        assert!(text_h < small_h && small_h < full_h, "each mode stacks shorter boards");
+        // Hit boxes follow the width.
+        let (x, y, w, h) = p.chip_box(0).scaled(1.0);
+        assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 1.0), Some(0));
+    }
+
     fn settings() -> SettingsPanel {
         SettingsPanel {
             theme: ThemeName::Dark,
+            compact: CompactMode::Full,
             config_path: "~/.config/hsbg-overlay/config.toml".into(),
             save_error: None,
             hover: None,
@@ -1926,15 +2118,17 @@ mod tests {
     }
 
     #[test]
-    fn settings_rows_pick_themes() {
+    fn settings_rows_pick_themes_and_compact_modes() {
         let p = settings();
-        let (x, y, w, h) = SettingsPanel::row_box(1).scaled(2.0);
+        let (x, y, w, h) = SettingsPanel::row_box(SettingsPanel::theme_row_top(), 1).scaled(2.0);
         assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Theme(1)));
+        let (x, y, w, h) = SettingsPanel::row_box(SettingsPanel::compact_row_top(), 2).scaled(2.0);
+        assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Compact(2)));
         assert_eq!(p.hit(4.0, 4.0, 2.0), None, "title band is not clickable");
-        // Three rows fit above the footer, which fits inside the panel.
-        assert_eq!(p.size(1.0, 1000), (252, 214));
-        let (_, y, _, h) = SettingsPanel::row_box(2).scaled(1.0);
-        assert!(y + h < 214.0);
+        // Both sections fit above the footer, which fits inside the panel.
+        assert_eq!(p.size(1.0, 1000), (252, 354));
+        let (_, y, _, h) = SettingsPanel::row_box(SettingsPanel::compact_row_top(), 2).scaled(1.0);
+        assert!(y + h < 354.0);
     }
 
     #[test]
