@@ -9,7 +9,8 @@ só para as tribos da lobby, um campo da memória do cliente.
 | Painel | Onde | Conteúdo |
 |---|---|---|
 | Chances do combate | topo, centro | Letal / Vitória / Empate / Derrota / Letal, simuladas no início de cada combate (fica esmaecido na loja mostrando o último combate) |
-| Turno + tiers | topo, direita | Turno atual e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
+| Turno + tiers | topo, direita | Turno atual, botão de ajustes e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
+| Ajustes | botão de sliders no topo | Tema dos painéis: escuro, claro ou alto contraste. Troca na hora e grava a escolha no config |
 | Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
 | Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
@@ -97,9 +98,24 @@ Sem acesso (ou com `read_game_memory = false`), as tribos são inferidas dos
 minions que o Bob oferece, completas em 2–4 turnos; até lá a lista mostra as
 não confirmadas com `?`.
 
+### Temas e ajustes
+
+O botão com ícone de controles deslizantes na barra do topo abre o painel
+**Settings**:
+
+- **Temas**: escolha entre **Dark** (tema escuro padrão), **Light** (tema claro
+  para ambientes bem iluminados) e **High contrast** (fundo preto puro, bordas
+  e textos nítidos; usa azul para vitórias e laranja para derrotas, pensado para
+  daltonismo).
+- **Troca ao vivo**: ao clicar em uma opção de tema, todos os painéis abertos
+  são repintados imediatamente com a nova paleta.
+- **Persistência automática**: a escolha é salva na hora em
+  `~/.config/hsbg-overlay/config.toml`, preservando seus comentários, seções e
+  demais chaves existentes.
+
 ## Requisitos
 
-- Rust (stable), Node.js ≥ 18 e npm
+- Rust (stable, cargo), Node.js ≥ 18 e npm
 - Um compositor (picom, xcompmgr…) para painéis translúcidos; sem ele os
   painéis ficam opacos
 - Log do Hearthstone ativado: o overlay cria/corrige o `log.config` do
@@ -111,12 +127,26 @@ não confirmadas com `?`.
 ./install.sh
 ```
 
-Compila em modo release, instala `~/.local/bin/hsbg-overlay` e o simulador em
-`~/.local/share/hsbg-overlay/sidecar` (`npm ci`). Para atualizar, rode
-`./install.sh` de novo: ele puxa os commits novos do branch remoto (se não
-houver alterações locais), recompila e só substitui o que mudou; reinicie o
-overlay em seguida se ele estiver aberto. Para rodar direto do
-repositório: `(cd sidecar && npm ci)` e `cargo run --release`.
+O script `./install.sh`:
+- Valida os pré-requisitos (`cargo`, `node` ≥ 18, `npm`);
+- Se for uma cópia clonada com upstream configurado e limpo, puxa novos commits automaticamente;
+- Compila o binário em modo release (`cargo build --release`);
+- Instala o executável em `~/.local/bin/hsbg-overlay` (apenas se houver mudanças);
+- Copia e instala as dependências do simulador em `~/.local/share/hsbg-overlay/sidecar` (`npm ci`);
+- Garante a criação da pasta de configurações `~/.config/hsbg-overlay`;
+- Alerta caso `~/.local/bin` não esteja no seu `$PATH` ou se o overlay já estiver em execução.
+
+Para desinstalar:
+```sh
+./uninstall.sh          # remove binário e pasta sidecar
+./uninstall.sh --purge  # remove também ~/.config/hsbg-overlay e ~/.cache/hsbg-overlay
+```
+
+Para rodar direto do repositório em desenvolvimento:
+```sh
+(cd sidecar && npm ci)
+cargo run --release
+```
 
 No dwm, inicie junto com a sessão (por exemplo no `~/.xinitrc`):
 
@@ -134,11 +164,17 @@ e elas somem quando você troca de tag ou foca outra janela.
 popup do oponente não abrir no lugar certo, rode `hsbg-overlay --calibrate`
 durante uma partida e ajuste `[leaderboard]`.
 
+O tema dos painéis vem de `theme` (`"dark"`, `"light"` ou
+`"high-contrast"`). Também dá para trocar ao vivo no botão de ajustes da
+barra do topo: a escolha é aplicada na hora e reescrita no config, mantendo
+comentários e as outras chaves. O alto contraste usa fundo preto e cores
+vivas, com vitória em azul e derrota em laranja para quem tem daltonismo.
+
 ## Ferramentas de diagnóstico
 
 ```sh
 hsbg-overlay --replay <Power.log>            # cada combate: chances simuladas x resultado real
-hsbg-overlay --render-ui <Power.log> <pasta>  # renderiza os painéis em PNG (inclui variantes do filtro), sem o jogo
+hsbg-overlay --render-ui <Power.log> <pasta>  # renderiza os painéis em PNG (inclui variantes de filtro e settings), sem o jogo
 hsbg-overlay --logs <pasta Logs>             # segue outra pasta de logs
 hsbg-overlay --lobby-tribes                  # tribos da partida atual, lidas da memória
 RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador)
@@ -155,10 +191,12 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
   (`@firestone-hs/simulate-bgs-battle`); recebe o snapshot via JSON lines.
   Ele só sobe quando começa uma partida e é encerrado após 10 min sem jogo.
 - `src/memory`: leitor mínimo do runtime Mono (domínio raiz → assemblies →
-  classes → campos) via `/proc/<pid>/mem`, numa thread que consulta a cada
-  0,7 s.
+  classes → campos, incluindo suporte a instâncias de classes genéricas) via
+  `/proc/<pid>/mem`, numa thread que consulta a cada 0,7 s.
 - `src/comps.rs`: tier list e guias de comps de
   `hsreplay.net/api/v1/battlegrounds/comp_guides/` (público, sem login).
+- `src/enablers.rs`: estatísticas e classificação de heróis enablers cruzando
+  dados de composições do HSReplay com os rankings públicos da Firestone.
 - `src/images.rs` + `src/net.rs`: imagens das cartas, baixadas e decodificadas
   em 8 threads de fundo, com cache em disco (`tiles/` e `renders/` em
   `~/.cache/hsbg-overlay`). As renders das cartas da tier list são pré-baixadas
@@ -171,6 +209,8 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
   busca (minion, feitiço, herói, trinket, anomalia, recompensa).
 - `src/search.rs`: busca aproximada por nome (prefixo, palavras fora de ordem,
   abreviações e erros de digitação), usada pelo painel **Search**.
+- `src/ui/theme.rs`: paletas de cores centralizadas (Dark, Light, High Contrast)
+  usadas por todos os painéis, com persistência atômica no arquivo de configuração.
 - `src/x11.rs` + `src/ui`: janelas ARGB override-redirect desenhadas com
   tiny-skia/fontdue; posições relativas à janela do jogo, que é rastreada a
   cada 250 ms.

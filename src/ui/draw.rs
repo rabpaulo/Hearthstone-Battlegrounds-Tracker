@@ -275,7 +275,7 @@ impl Canvas {
         width
     }
 
-    /// Text with a dark drop shadow, for legibility over card art.
+    /// Text with a drop shadow, for legibility over card art.
     #[allow(clippy::too_many_arguments)]
     pub fn text_shadow(
         &mut self,
@@ -287,9 +287,10 @@ impl Canvas {
         weight: Weight,
         color: Rgba,
         align: Align,
+        shadow: Rgba,
     ) -> f32 {
         let off = (px / 14.0).max(1.0);
-        self.text(fonts, text, x + off, y + off, px, weight, Rgba(0, 0, 0, 200), align);
+        self.text(fonts, text, x + off, y + off, px, weight, shadow, align);
         self.text(fonts, text, x, y, px, weight, color, align)
     }
 

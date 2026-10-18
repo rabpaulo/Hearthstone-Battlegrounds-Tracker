@@ -17,14 +17,17 @@ mod off {
     pub const IMAGE_CLASS_CACHE: u64 = 0x4d0;
     pub const HASH_TABLE_SIZE: u64 = 0x18;
     pub const HASH_TABLE_TABLE: u64 = 0x20;
+    pub const CLASS_KIND: u64 = 0x1b;
     pub const CLASS_PARENT: u64 = 0x30;
     pub const CLASS_NAME: u64 = 0x48;
     pub const CLASS_NAMESPACE: u64 = 0x50;
     pub const CLASS_VTABLE_SIZE: u64 = 0x5c;
     pub const CLASS_FIELDS: u64 = 0x98;
     pub const CLASS_RUNTIME_INFO: u64 = 0xd0;
+    pub const CLASS_GENERIC_CLASS: u64 = 0xf0;
     pub const CLASS_FIELD_COUNT: u64 = 0x100;
     pub const CLASS_NEXT_CACHE: u64 = 0x108;
+    pub const GENERIC_CONTAINER_CLASS: u64 = 0x0;
     pub const FIELD_SIZE: u64 = 0x20;
     pub const FIELD_NAME: u64 = 0x8;
     pub const FIELD_OFFSET: u64 = 0x18;
@@ -36,6 +39,9 @@ mod off {
 
 /// `FIELD_ATTRIBUTE_STATIC` in a `MonoType`'s attributes.
 const ATTR_STATIC: u32 = 0x10;
+
+/// `MONO_CLASS_GINST` in Mono's `class_kind`.
+const KIND_GINST: u8 = 3;
 
 /// Sanity bounds so corrupt pointers cannot send a walk into a long loop.
 const MAX_LIST_NODES: usize = 2000;
@@ -191,8 +197,16 @@ impl<M: Memory> Mono<M> {
             if k == 0 {
                 break;
             }
-            let count = self.mem.u32(k + off::CLASS_FIELD_COUNT)?;
-            let fields = self.mem.u64(k + off::CLASS_FIELDS)?;
+            let def_k = if self.mem.bytes(k + off::CLASS_KIND, 1).is_ok_and(|b| b[0] == KIND_GINST) {
+                match self.mem.u64(k + off::CLASS_GENERIC_CLASS) {
+                    Ok(gen) if gen != 0 => self.mem.u64(gen + off::GENERIC_CONTAINER_CLASS).unwrap_or(k),
+                    _ => k,
+                }
+            } else {
+                k
+            };
+            let count = self.mem.u32(def_k + off::CLASS_FIELD_COUNT)?;
+            let fields = self.mem.u64(def_k + off::CLASS_FIELDS)?;
             if fields != 0 && count <= MAX_FIELDS {
                 for i in 0..count as u64 {
                     let f = fields + i * off::FIELD_SIZE;

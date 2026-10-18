@@ -1,7 +1,7 @@
 //! The overlay application: log → game state → panel models → X11 windows.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -9,19 +9,20 @@ use x11rb::protocol::Event;
 
 use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe};
 use crate::comps::{CompGuide, Comps, CompsState};
-use crate::config::{Config, LeaderboardGeometry};
+use crate::config::{self, Config, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
 use crate::history::{self, GameRecord, History};
 use crate::images::{ImageKind, Images};
 use crate::logfile::tail::LogTailer;
 use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
-use crate::ui::draw::{Canvas, Fonts};
+use crate::ui::draw::{Canvas, Fonts, Rgba};
 use crate::ui::panels::{
     self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
-    OpponentPopup, SearchHit, SearchPanel, SearchRow, SimPanel, TierHit, TierList, TierRow, TierSection, TopBar, TopHit,
+    OpponentPopup, SearchHit, SearchPanel, SearchRow, SettingsHit, SettingsPanel, SimPanel, TierHit, TierList, TierRow,
+    TierSection, TopBar, TopHit,
 };
-use crate::ui::draw::Rgba;
+use crate::ui::theme::{Theme, ThemeName};
 use crate::x11::{GameWindow, Key, OverlayWindow, Rect, X11};
 
 const TICK: Duration = Duration::from_millis(30);
@@ -75,6 +76,11 @@ pub struct UiState {
     pub search_focus: bool,
     pub search_scroll: f32,
     pub search_hover: Option<SearchHit>,
+    pub settings_open: bool,
+    /// Theme row of the settings panel under the pointer.
+    pub settings_hover: Option<SettingsHit>,
+    /// A theme that could not be written to the config, shown in the panel.
+    pub settings_error: Option<String>,
 }
 
 impl UiState {
@@ -102,12 +108,15 @@ impl UiState {
         }
     }
 
-    /// Opens or closes a panel; only one of tiers, comps and search is open.
+    /// Opens or closes a panel; only one of tiers, comps, search and
+    /// settings is open.
     fn close_panels(&mut self) {
         self.selected_tier = None;
         self.comps_open = false;
         self.search_open = false;
         self.search_focus = false;
+        self.settings_open = false;
+        self.settings_hover = None;
     }
 
     /// Applies a key typed into the search field. `rows` is the number of
@@ -267,6 +276,9 @@ pub struct Overlay {
     pub comps: Comps,
     pub sim_view: SimView,
     pub ui: UiState,
+    /// Palette every panel draws with, and the choice it came from.
+    pub theme: Theme,
+    pub theme_name: ThemeName,
     last_combat: Option<Box<CombatSnapshot>>,
     /// Lobby tribes read from the game's memory, with the `GameState` they
     /// belong to.
@@ -318,6 +330,7 @@ fn keywords(e: &RawEntity) -> Vec<&'static str> {
 
 impl Overlay {
     pub fn new(cfg: Config, db: CardDb, history: History) -> Overlay {
+        let theme_name = cfg.theme;
         Overlay {
             db,
             game: Game::new(),
@@ -327,12 +340,21 @@ impl Overlay {
             comps: Comps::new(),
             sim_view: SimView::default(),
             ui: UiState { hide_unavailable: cfg.hide_unavailable_tribes, ..UiState::default() },
+            theme: theme_name.theme(),
+            theme_name,
             last_combat: None,
             lobby_memory: None,
             ended_game: None,
             search_cache: Default::default(),
             cfg,
         }
+    }
+
+    /// Switches the palette; the panels pick it up on the next draw.
+    pub fn set_theme(&mut self, name: ThemeName) {
+        self.theme_name = name;
+        self.theme = name.theme();
+        self.cfg.theme = name;
     }
 
     pub fn set_lobby_memory(&mut self, lobby: Option<LobbyRaces>) {
@@ -381,6 +403,8 @@ impl Overlay {
                     self.ui.comp_id = None;
                     self.ui.search_open = false;
                     self.ui.search_focus = false;
+                    self.ui.settings_open = false;
+                    self.ui.settings_hover = None;
                     self.ui.board_flips.clear();
                     self.last_combat = None;
                     self.comps.refresh();
@@ -459,6 +483,7 @@ impl Overlay {
             comps_open: self.ui.comps_open,
             search: self.cfg.show_search,
             search_open: self.ui.search_open,
+            settings_open: self.ui.settings_open,
         }
     }
 
@@ -495,8 +520,8 @@ impl Overlay {
                         };
                         (title, panels::tribe_color(t), dim)
                     }
-                    GroupKind::Neutral => ("Neutral".to_string(), panels::theme::DIM, false),
-                    GroupKind::AllTribes => ("All tribes".to_string(), panels::theme::GOLD, false),
+                    GroupKind::Neutral => ("Neutral".to_string(), self.theme.dim, false),
+                    GroupKind::AllTribes => ("All tribes".to_string(), self.theme.gold, false),
                 };
                 TierSection { title, color, dim, rows: g.cards.iter().filter(|c| wanted(c)).map(|c| row(c, false)).collect() }
             })
@@ -506,7 +531,7 @@ impl Overlay {
         if !spells.is_empty() {
             sections.push(TierSection {
                 title: "Spells".to_string(),
-                color: panels::theme::ACCENT,
+                color: self.theme.accent,
                 dim: false,
                 rows: spells.iter().map(|c| row(c, true)).collect(),
             });
@@ -598,7 +623,7 @@ impl Overlay {
                 id: g.id,
                 name: g.name.clone(),
                 detail: detail.join(" · "),
-                color: g.tribe.map(panels::tribe_color).unwrap_or(panels::theme::GOLD),
+                color: g.tribe.map(panels::tribe_color).unwrap_or(self.theme.gold),
                 card_id: g.representative_card.clone(),
                 trend: g.trend(),
                 dim,
@@ -688,7 +713,7 @@ impl Overlay {
             query: self.ui.search_query.clone(),
             focused: self.ui.search_focus,
             category,
-            rows: hits.iter().take(SEARCH_ROWS).map(|c| search_row(c)).collect(),
+            rows: hits.iter().take(SEARCH_ROWS).map(|c| search_row(c, &self.theme)).collect(),
             more: n.saturating_sub(SEARCH_ROWS),
             note: if browsing { "Type a name, or pick a card type".into() } else { "No cards match".into() },
             subtitle,
@@ -744,6 +769,17 @@ impl Overlay {
             dim: !in_combat,
             running: v.running,
             note: v.error.clone(),
+        }
+    }
+
+    /// The settings panel's model: the current theme and where a pick is
+    /// saved.
+    pub fn settings_panel(&self, config_path: &Path) -> SettingsPanel {
+        SettingsPanel {
+            theme: self.theme_name,
+            config_path: short_home(config_path),
+            save_error: self.ui.settings_error.clone(),
+            hover: self.ui.settings_hover,
         }
     }
 
@@ -818,7 +854,7 @@ impl Overlay {
 }
 
 /// One search result: type and the details that tell look-alikes apart.
-fn search_row(c: &Card) -> SearchRow {
+fn search_row(c: &Card, theme: &Theme) -> SearchRow {
     let category = c.category.unwrap_or(Category::Minion);
     let cost = (c.cost > 0).then(|| format!("{} gold", c.cost));
     let (mut detail, color) = match category {
@@ -832,17 +868,17 @@ fn search_row(c: &Card) -> SearchRow {
             };
             let kind = if c.timewarped { "Timewarped minion" } else { "Minion" };
             let color = match c.tribes.first() {
-                _ if c.all_tribes => panels::theme::GOLD,
+                _ if c.all_tribes => theme.gold,
                 Some(&t) => panels::tribe_color(t),
-                None => panels::theme::DIM,
+                None => theme.dim,
             };
             (vec![kind.to_string(), tribes], color)
         }
-        Category::Spell => (vec!["Tavern spell".to_string()], panels::theme::ACCENT),
-        Category::Hero => (vec!["Hero".to_string()], panels::theme::GOLD),
+        Category::Spell => (vec!["Tavern spell".to_string()], theme.accent),
+        Category::Hero => (vec!["Hero".to_string()], theme.gold),
         Category::Trinket => (vec!["Trinket".to_string()], Rgba::hex(0x9c6ad6)),
         Category::Anomaly => (vec!["Anomaly".to_string()], Rgba::hex(0x2a9d8f)),
-        Category::Reward => (vec!["Quest reward".to_string()], panels::theme::WIN),
+        Category::Reward => (vec!["Quest reward".to_string()], theme.win),
     };
     if matches!(category, Category::Spell | Category::Trinket) {
         detail.extend(cost);
@@ -852,6 +888,15 @@ fn search_row(c: &Card) -> SearchRow {
     }
     let tier = if matches!(c.kind, Kind::Minion | Kind::TavernSpell) && category != Category::Hero { c.tier } else { 0 };
     SearchRow { card_id: c.id.clone(), name: c.name.clone(), detail: detail.join(" · "), color, tier }
+}
+
+/// `~/.config/hsbg-overlay/config.toml` reads better in a panel than the
+/// full path.
+fn short_home(path: &Path) -> String {
+    match dirs::home_dir().as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
 }
 
 // ---- X11 application -----------------------------------------------------
@@ -890,6 +935,11 @@ impl<M: PartialEq + Clone> Panel<M> {
     fn hide(&mut self, x: &X11) {
         self.win.hide(x);
     }
+
+    /// Forces the next update to repaint, e.g. after a theme switch.
+    fn invalidate(&mut self) {
+        self.last = None;
+    }
 }
 
 struct Panels {
@@ -899,13 +949,14 @@ struct Panels {
     tiers: Panel<TierList>,
     comps: Panel<CompPanel>,
     search: Panel<SearchPanel>,
+    settings: Panel<SettingsPanel>,
     preview: Panel<CardPreview>,
     popup: Panel<OpponentPopup>,
     calib: Panel<Calibration>,
 }
 
 impl Panels {
-    fn windows(&self) -> [&OverlayWindow; 9] {
+    fn windows(&self) -> [&OverlayWindow; 10] {
         [
             &self.info.win,
             &self.sim.win,
@@ -913,6 +964,7 @@ impl Panels {
             &self.tiers.win,
             &self.comps.win,
             &self.search.win,
+            &self.settings.win,
             &self.calib.win,
             &self.preview.win,
             &self.popup.win,
@@ -926,9 +978,24 @@ impl Panels {
         self.tiers.hide(x);
         self.comps.hide(x);
         self.search.hide(x);
+        self.settings.hide(x);
         self.preview.hide(x);
         self.popup.hide(x);
         self.calib.hide(x);
+    }
+
+    /// Marks every panel dirty; the theme switch repaints the whole overlay.
+    fn invalidate_all(&mut self) {
+        self.info.invalidate();
+        self.sim.invalidate();
+        self.top.invalidate();
+        self.tiers.invalidate();
+        self.comps.invalidate();
+        self.search.invalidate();
+        self.settings.invalidate();
+        self.preview.invalidate();
+        self.popup.invalidate();
+        self.calib.invalidate();
     }
 }
 
@@ -942,6 +1009,8 @@ pub struct App {
     game_window: Option<GameWindow>,
     active: Option<u32>,
     calibrate: bool,
+    /// Where the theme picked in the settings panel is written.
+    config_path: PathBuf,
     /// The search field holds the keyboard.
     keyboard_grabbed: bool,
     need_raise: bool,
@@ -973,6 +1042,7 @@ impl App {
             tiers: Panel::new(&x, "hsbg-tiers", true)?,
             comps: Panel::new(&x, "hsbg-comps", true)?,
             search: Panel::new(&x, "hsbg-search", true)?,
+            settings: Panel::new(&x, "hsbg-settings", true)?,
             preview: Panel::new(&x, "hsbg-preview", false)?,
             popup: Panel::new(&x, "hsbg-opponent", true)?,
             calib: Panel::new(&x, "hsbg-calibration", false)?,
@@ -988,6 +1058,7 @@ impl App {
             game_window: None,
             active: None,
             calibrate,
+            config_path: crate::paths::config_path(),
             keyboard_grabbed: false,
             need_raise: true,
             dirty: true,
@@ -1141,6 +1212,22 @@ impl App {
         self.game_window.map(|g| Layout::new(g.rect, &self.ov.cfg))
     }
 
+    /// Applies a theme picked in the settings panel, live, and writes it to
+    /// the config; a failure is shown in the panel instead.
+    fn pick_theme(&mut self, i: usize) {
+        let Some(name) = ThemeName::ALL.get(i).copied() else { return };
+        if name != self.ov.theme_name {
+            self.ov.set_theme(name);
+            self.panels.invalidate_all();
+        }
+        self.ov.ui.settings_error = None;
+        if let Err(e) = config::save_theme(&self.config_path, name) {
+            log::warn!("could not save the theme: {e:#}");
+            self.ov.ui.settings_error = Some(e.to_string());
+        }
+        self.dirty = true;
+    }
+
     fn handle_x_events(&mut self) {
         let s = self.layout().map(|l| l.s).unwrap_or(1.0);
         while let Some(ev) = self.x.poll_event() {
@@ -1180,6 +1267,12 @@ impl App {
                             ui.search_open = open;
                             ui.search_focus = open;
                             ui.search_hover = None;
+                        }
+                        Some(TopHit::Settings) => {
+                            let open = !ui.settings_open;
+                            ui.close_panels();
+                            ui.settings_open = open;
+                            ui.settings_hover = None;
                         }
                         None => {}
                     }
@@ -1257,6 +1350,22 @@ impl App {
                         Some(SearchHit::Row(_)) | None => {}
                     }
                 }
+                Event::ButtonPress(e) if e.event == self.panels.settings.win.id && e.detail == 3 => {
+                    self.ov.ui.settings_open = false;
+                    self.ov.ui.settings_hover = None;
+                }
+                Event::ButtonPress(e) if e.event == self.panels.settings.win.id && e.detail == 1 => {
+                    let hit = self.panels.settings.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    if let Some(SettingsHit::Theme(i)) = hit {
+                        self.pick_theme(i);
+                    }
+                    self.ov.ui.settings_hover = hit;
+                }
+                Event::MotionNotify(e) if e.event == self.panels.settings.win.id => {
+                    self.ov.ui.settings_hover =
+                        self.panels.settings.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                }
+                Event::LeaveNotify(e) if e.event == self.panels.settings.win.id => self.ov.ui.settings_hover = None,
                 Event::KeyPress(e) if self.keyboard_grabbed => {
                     if let Some(key) = self.x.key(e.detail, e.state) {
                         let rows = self.panels.search.model().map(|m| m.rows.len()).unwrap_or(0);
@@ -1429,6 +1538,7 @@ impl App {
         let popup = self.ov.ui.slot_hover.and_then(|slot| self.ov.popup(slot).map(|p| (slot, p)));
         let comps = self.ov.comp_panel();
         let search = self.ov.search_panel();
+        let settings = self.ov.ui.settings_open.then(|| self.ov.settings_panel(&self.config_path));
         // Card under the pointer, with the item it belongs to.
         let preview = tiers
             .as_ref()
@@ -1460,7 +1570,7 @@ impl App {
         }
 
         let opaque = !self.x.compositing;
-        let mut ctx = Ctx { fonts: &mut self.ov.fonts, images: &mut self.ov.images, s, opaque };
+        let mut ctx = Ctx { fonts: &mut self.ov.fonts, images: &mut self.ov.images, theme: self.ov.theme, s, opaque };
         let x = &self.x;
         let p = &mut self.panels;
 
@@ -1471,7 +1581,8 @@ impl App {
             p.info.hide(x);
         }
         let top_rect = layout.top_bar(top.size(s));
-        let show_top = in_game && (cfg.show_tiers || cfg.show_comps || cfg.show_search);
+        // The settings button lives in the bar, so it shows whenever a game does.
+        let show_top = in_game;
         if in_game && cfg.show_simulation && self.ov.game.turn() >= 1 {
             let rect = layout.sim(sim.size(s), show_top.then_some(top_rect));
             p.sim.update(x, rect, &sim, &mut ctx, |m, c, ctx| m.render(c, ctx));
@@ -1514,6 +1625,15 @@ impl App {
                 hovered_at = hovered_at.or_else(|| preview.as_ref().map(|(_, i)| (rect, panel.row_center(*i, s).unwrap_or(0.0))));
             }
             _ => p.search.hide(x),
+        }
+        match &settings {
+            Some(panel) if show_top => {
+                let (tx, ty, max_h) = layout.tier_list(top_rect, (SettingsPanel::W * s).ceil() as i32);
+                let (w, h) = panel.size(s, max_h);
+                let rect = Rect::new(tx, ty, w, h);
+                p.settings.update(x, rect, panel, &mut ctx, |m, c, ctx| m.render(c, ctx));
+            }
+            _ => p.settings.hide(x),
         }
         let preview_rect = match (&preview, hovered_at) {
             (Some((pv, _)), Some((pr, center))) => pv.size(s, ctx.images).map(|(w, h)| {
@@ -1709,6 +1829,12 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     ov.ui.search_category = Some(Category::Hero);
     search_panels.extend(ov.search_panel().map(|p| ("search-heroes", p)));
     ov.ui.search_open = false;
+    // Settings: the theme list, second row under the pointer.
+    ov.ui.settings_open = true;
+    ov.ui.settings_hover = Some(SettingsHit::Theme(1));
+    let settings = ov.settings_panel(&crate::paths::config_path());
+    ov.ui.settings_open = false;
+    ov.ui.settings_hover = None;
     let ids: Vec<String> = comp_panels
         .iter()
         .flat_map(|(_, p)| &p.items)
@@ -1724,7 +1850,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         std::thread::sleep(Duration::from_millis(100));
         ov.images.poll();
     }
-    let mut ctx = Ctx { fonts: &mut ov.fonts, images: &mut ov.images, s, opaque: false };
+    let mut ctx = Ctx { fonts: &mut ov.fonts, images: &mut ov.images, theme: ov.theme, s, opaque: false };
     for (name, l) in &variants {
         let (w, h) = l.size(s, (hs.h as f32 * 0.85) as i32);
         let mut scratch = Canvas::new(w, h);
@@ -1740,6 +1866,9 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         let mut scratch = Canvas::new(w, h);
         emit(&mut scratch, &mut ctx, out, name, Rect::new(0, 0, w, h), &|c, ctx| p.render(c, ctx))?;
     }
+    let (w, h) = settings.size(s, (hs.h as f32 * 0.85) as i32);
+    let mut scratch = Canvas::new(w, h);
+    emit(&mut scratch, &mut ctx, out, "settings", Rect::new(0, 0, w, h), &|c, ctx| settings.render(c, ctx))?;
     let sc = &mut screen;
     emit(sc, &mut ctx, out, "info", layout.info(info.size(s)), &|c, ctx| info.render(c, ctx))?;
     let top_rect = layout.top_bar(top.size(s));

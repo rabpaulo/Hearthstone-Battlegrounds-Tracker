@@ -5,31 +5,9 @@
 //! scales them to the actual window.
 
 use super::draw::{Align, Canvas, Fonts, Rgba, Weight};
+use super::theme::{Theme, ThemeName};
 use crate::cards::{Category, Tribe, KEYWORDS};
 use crate::images::{ImageKind, Images};
-
-pub mod theme {
-    use super::Rgba;
-    pub const BG: Rgba = Rgba(12, 15, 26, 228);
-    pub const BG_OPAQUE: Rgba = Rgba(12, 15, 26, 255);
-    pub const BORDER: Rgba = Rgba(74, 96, 150, 150);
-    pub const HEADER: Rgba = Rgba(26, 36, 64, 255);
-    pub const BUTTON: Rgba = Rgba(28, 34, 54, 255);
-    pub const BUTTON_HOVER: Rgba = Rgba(45, 58, 96, 255);
-    pub const ACCENT: Rgba = Rgba(64, 98, 180, 255);
-    pub const TEXT: Rgba = Rgba(238, 240, 246, 255);
-    pub const DIM: Rgba = Rgba(146, 156, 182, 255);
-    pub const GOLD: Rgba = Rgba(242, 193, 78, 255);
-    pub const WIN: Rgba = Rgba(102, 187, 106, 255);
-    pub const TIE: Rgba = Rgba(189, 189, 189, 255);
-    pub const LOSS: Rgba = Rgba(239, 83, 80, 255);
-    pub const WIN_LETHAL: Rgba = Rgba(46, 160, 67, 255);
-    pub const LOSS_LETHAL: Rgba = Rgba(198, 40, 40, 255);
-    pub const ATTACK: Rgba = Rgba(224, 165, 38, 255);
-    pub const HEALTH: Rgba = Rgba(192, 57, 43, 255);
-}
-
-use theme::*;
 
 pub fn tribe_color(t: Tribe) -> Rgba {
     Rgba::hex(match t {
@@ -50,6 +28,8 @@ pub fn tribe_color(t: Tribe) -> Rgba {
 pub struct Ctx<'a> {
     pub fonts: &'a mut Fonts,
     pub images: &'a mut Images,
+    /// Colours every panel draws with; the settings panel switches them.
+    pub theme: Theme,
     pub s: f32,
     /// No compositor: paint opaque, square panels.
     pub opaque: bool,
@@ -70,20 +50,39 @@ impl Ctx<'_> {
 
     #[allow(clippy::too_many_arguments)]
     fn label_shadow(&mut self, c: &mut Canvas, text: &str, x: f32, cy: f32, px: f32, w: Weight, color: Rgba) {
+        let shadow = self.theme.shadow;
+        self.label_shadow_on(c, text, x, cy, px, w, color, shadow);
+    }
+
+    /// `label_shadow` with an explicit shadow: badges keep a dark one in
+    /// every theme, because their fills are always bright.
+    #[allow(clippy::too_many_arguments)]
+    fn label_shadow_on(
+        &mut self,
+        c: &mut Canvas,
+        text: &str,
+        x: f32,
+        cy: f32,
+        px: f32,
+        w: Weight,
+        color: Rgba,
+        shadow: Rgba,
+    ) {
         let px = px * self.s;
         let y = self.mid(cy, px, w);
-        c.text_shadow(self.fonts, text, x, y, px, w, color, Align::Left);
+        c.text_shadow(self.fonts, text, x, y, px, w, color, Align::Left, shadow);
     }
 
     fn panel(&self, c: &mut Canvas) {
         let (w, h) = (c.width(), c.height());
+        let t = self.theme;
         if self.opaque {
-            c.rect(0.0, 0.0, w, h, BG_OPAQUE);
-            c.stroke_rrect(0.0, 0.0, w, h, 0.0, 1.0, BORDER);
+            c.rect(0.0, 0.0, w, h, t.bg_opaque);
+            c.stroke_rrect(0.0, 0.0, w, h, 0.0, 1.0, t.border);
         } else {
             let r = 8.0 * self.s;
-            c.rrect(0.0, 0.0, w, h, r, BG);
-            c.stroke_rrect(0.0, 0.0, w, h, r, 1.0, BORDER);
+            c.rrect(0.0, 0.0, w, h, r, t.bg);
+            c.stroke_rrect(0.0, 0.0, w, h, r, 1.0, t.border);
         }
     }
 
@@ -112,6 +111,7 @@ pub enum TopHit {
     Tier(i32),
     Comps,
     Search,
+    Settings,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +127,8 @@ pub struct TopBar {
     /// Same for the card search button.
     pub search: bool,
     pub search_open: bool,
+    /// The settings panel; its button is always there.
+    pub settings_open: bool,
 }
 
 impl TopBar {
@@ -146,18 +148,32 @@ impl TopBar {
         if self.search {
             tools.push((TopHit::Search, "Search", self.search_open));
         }
+        // The settings button shows an icon instead of a label.
+        tools.push((TopHit::Settings, "", self.settings_open));
         tools
     }
 
-    fn tool_x(i: usize) -> f32 {
-        Self::PAD + Self::TURN_W + Self::GAP * 2.0 + i as f32 * (Self::TOOL_W + Self::GAP)
+    /// The settings button is square like the tier buttons; the rest fit a label.
+    fn tool_w(hit: TopHit) -> f32 {
+        match hit {
+            TopHit::Settings => Self::BTN,
+            _ => Self::TOOL_W,
+        }
+    }
+
+    fn tool_x(&self, i: usize) -> f32 {
+        self.tools()
+            .into_iter()
+            .take(i)
+            .fold(Self::PAD + Self::TURN_W + Self::GAP * 2.0, |x, (hit, _, _)| x + Self::tool_w(hit) + Self::GAP)
     }
 
     /// Right edge of the last tool button.
     fn tools_end(&self) -> f32 {
-        match self.tools().len() {
-            0 => Self::tool_x(0),
-            n => Self::tool_x(n - 1) + Self::TOOL_W,
+        let tools = self.tools();
+        match tools.len() {
+            0 => Self::PAD + Self::TURN_W + Self::GAP * 2.0,
+            n => self.tool_x(n - 1) + Self::tool_w(tools[n - 1].0),
         }
     }
 
@@ -180,7 +196,8 @@ impl TopBar {
     pub fn hit(&self, x: f32, s: f32) -> Option<TopHit> {
         let x = x / s;
         for (i, (hit, _, _)) in self.tools().into_iter().enumerate() {
-            if x >= Self::tool_x(i) && x < Self::tool_x(i) + Self::TOOL_W {
+            let bx = self.tool_x(i);
+            if x >= bx && x < bx + Self::tool_w(hit) {
                 return Some(hit);
             }
         }
@@ -194,38 +211,64 @@ impl TopBar {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         ctx.panel(c);
         let label = if self.turn > 0 { format!("Turn {}", self.turn) } else { "Hero pick".to_string() };
-        ctx.label(c, &label, (Self::PAD + Self::TURN_W / 2.0) * s, Self::H / 2.0 * s, 15.0, Weight::Bold, TEXT, Align::Center);
-        let sep = |c: &mut Canvas, x: f32| c.rect(x * s, 7.0 * s, 1.0, (Self::H - 14.0) * s, BORDER);
+        ctx.label(c, &label, (Self::PAD + Self::TURN_W / 2.0) * s, Self::H / 2.0 * s, 15.0, Weight::Bold, t.text, Align::Center);
+        let sep = |c: &mut Canvas, x: f32| c.rect(x * s, 7.0 * s, 1.0, (Self::H - 14.0) * s, t.border);
         sep(c, Self::PAD + Self::TURN_W + Self::GAP);
         let by = (Self::H - Self::BTN) / 2.0 * s;
         let b = Self::BTN * s;
         let fill = |selected: bool, hover: bool| if selected {
-            ACCENT
+            t.accent
         } else if hover {
-            BUTTON_HOVER
+            t.button_hover
         } else {
-            BUTTON
+            t.button
         };
         let tools = self.tools();
         for (i, (hit, label, open)) in tools.iter().enumerate() {
-            let (bx, bw) = (Self::tool_x(i) * s, Self::TOOL_W * s);
+            let (bx, bw) = (self.tool_x(i) * s, Self::tool_w(*hit) * s);
             c.rrect(bx, by, bw, b, 5.0 * s, fill(*open, self.hover == Some(*hit)));
-            ctx.label(c, label, bx + bw / 2.0, by + b / 2.0, 13.0, Weight::Bold, TEXT, Align::Center);
+            let color = if *open { t.on_accent } else { t.text };
+            if *hit == TopHit::Settings {
+                settings_icon(c, ctx, bx + bw / 2.0, by + b / 2.0, color);
+            } else {
+                ctx.label(c, label, bx + bw / 2.0, by + b / 2.0, 13.0, Weight::Bold, color, Align::Center);
+            }
         }
         if !tools.is_empty() && self.max_tier > 0 {
             sep(c, self.tools_end() + Self::GAP * 1.5);
         }
-        for t in 1..=self.max_tier {
-            let bx = self.button_x(t) * s;
-            c.rrect(bx, by, b, b, 5.0 * s, fill(self.selected == Some(t), self.hover == Some(TopHit::Tier(t))));
-            if t == self.tavern_tier {
-                c.stroke_rrect(bx, by, b, b, 5.0 * s, 2.0 * s, GOLD);
+        for tier in 1..=self.max_tier {
+            let bx = self.button_x(tier) * s;
+            let selected = self.selected == Some(tier);
+            c.rrect(bx, by, b, b, 5.0 * s, fill(selected, self.hover == Some(TopHit::Tier(tier))));
+            if tier == self.tavern_tier {
+                c.stroke_rrect(bx, by, b, b, 5.0 * s, 2.0 * s, t.gold);
             }
-            let color = if t <= self.tavern_tier || self.selected == Some(t) { TEXT } else { DIM };
-            ctx.label(c, &t.to_string(), bx + b / 2.0, by + b / 2.0, 15.0, Weight::Bold, color, Align::Center);
+            let color = if selected {
+                t.on_accent
+            } else if tier <= self.tavern_tier {
+                t.text
+            } else {
+                t.dim
+            };
+            ctx.label(c, &tier.to_string(), bx + b / 2.0, by + b / 2.0, 15.0, Weight::Bold, color, Align::Center);
         }
+    }
+}
+
+/// The settings button: three sliders.
+fn settings_icon(c: &mut Canvas, ctx: &mut Ctx, cx: f32, cy: f32, color: Rgba) {
+    let s = ctx.s;
+    let w = 16.0 * s;
+    let x = cx - w / 2.0;
+    let (track, knob) = (1.5 * s, 2.6 * s);
+    for (i, k) in [0.72, 0.32, 0.58].into_iter().enumerate() {
+        let y = cy + (i as f32 - 1.0) * 5.5 * s;
+        c.rrect(x, y - track / 2.0, w, track, track / 2.0, color);
+        c.circle(x + w * k, y, knob, color);
     }
 }
 
@@ -417,66 +460,68 @@ impl TierList {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let w = c.width();
         ctx.panel(c);
         self.render_rows(c, ctx);
         // Header drawn last so scrolled rows slide under it.
         let hh = self.header_h() * s;
         if ctx.opaque {
-            c.rect(0.0, 0.0, w, hh, BG_OPAQUE);
+            c.rect(0.0, 0.0, w, hh, t.bg_opaque);
         } else {
-            c.rrect(0.0, 0.0, w, hh.min(16.0 * s), 8.0 * s, BG_OPAQUE);
-            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, BG_OPAQUE);
+            c.rrect(0.0, 0.0, w, hh.min(16.0 * s), 8.0 * s, t.bg_opaque);
+            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, t.bg_opaque);
         }
         self.render_title(c, ctx);
         self.render_filter(c, ctx);
-        c.rect(0.0, hh - 1.0, w, 1.0, BORDER);
+        c.rect(0.0, hh - 1.0, w, 1.0, t.border);
         let max_scroll = self.max_scroll(s, c.height() as i32);
         if max_scroll > 0.0 {
             let track = c.height() - hh - 8.0 * s;
             let thumb = (track * c.height() / (self.content_h() * s)).max(20.0 * s);
             let ty = hh + 4.0 * s + (track - thumb) * (self.scroll / max_scroll);
-            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, Rgba(255, 255, 255, 90));
+            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, t.scrollbar);
         }
     }
 
     fn render_rows(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let inner_x = Self::PAD * s;
         let inner_w = c.width() - 2.0 * Self::PAD * s;
-        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
+        let base = if ctx.opaque { t.bg_opaque } else { t.row };
         let mut y = self.header_h() * s - self.scroll;
         if self.sections.is_empty() {
             let msg = format!("No {} cards in tier {}", self.keyword_label(), self.tier);
-            ctx.label(c, &msg, c.width() / 2.0, y + Self::ROW * s / 2.0, 11.5, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, &msg, c.width() / 2.0, y + Self::ROW * s / 2.0, 11.5, Weight::Medium, t.dim, Align::Center);
             return;
         }
         let mut index = 0;
         for sec in &self.sections {
             let hh = Self::HEAD * s;
             if y + hh > 0.0 && y < c.height() {
-                c.rect(inner_x, y, inner_w, hh, HEADER);
+                c.rect(inner_x, y, inner_w, hh, t.header);
                 c.rect(inner_x, y, 4.0 * s, hh, if sec.dim { sec.color.alpha(110) } else { sec.color });
-                let color = if sec.dim { DIM } else { TEXT };
+                let color = if sec.dim { t.dim } else { t.text };
                 ctx.label(c, &sec.title, inner_x + 11.0 * s, y + hh / 2.0, 13.0, Weight::Bold, color, Align::Left);
             }
             y += hh;
             for row in &sec.rows {
                 let rh = Self::ROW * s;
                 if y + rh > 0.0 && y < c.height() {
-                    ctx.tile_row(c, &row.card_id, inner_x, y + 1.0, inner_w, rh - 1.0, base);
+                    ctx.tile_row(c, &row.card_id, inner_x, y + 1.0 * s, inner_w, rh - 1.0 * s, base);
                     if self.hover == Some(TierHit::Row(index)) {
-                        c.rect(inner_x, y + 1.0, inner_w, rh - 1.0, Rgba(255, 255, 255, 28));
-                        c.rect(inner_x, y + 1.0, 3.0 * s, rh - 1.0, GOLD);
+                        c.rect(inner_x, y + 1.0 * s, inner_w, rh - 1.0 * s, t.tint);
+                        c.rect(inner_x, y + 1.0 * s, 3.0 * s, rh - 1.0 * s, t.gold);
                     }
                     let max = inner_w - if row.cost.is_some() { 40.0 * s } else { 14.0 * s };
                     let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Medium, max);
-                    let color = if sec.dim { DIM } else { TEXT };
+                    let color = if sec.dim { t.dim } else { t.text };
                     ctx.label_shadow(c, &name, inner_x + 9.0 * s, y + rh / 2.0, 12.5, Weight::Medium, color);
                     if let Some(cost) = row.cost {
                         let cx = inner_x + inner_w - 14.0 * s;
                         c.circle(cx, y + rh / 2.0, 9.5 * s, Rgba(0, 0, 0, 160));
-                        c.circle(cx, y + rh / 2.0, 8.5 * s, GOLD);
+                        c.circle(cx, y + rh / 2.0, 8.5 * s, BADGE_GOLD);
                         ctx.label(c, &cost.to_string(), cx, y + rh / 2.0, 11.5, Weight::Bold, Rgba(40, 28, 0, 255), Align::Center);
                     }
                 }
@@ -488,53 +533,56 @@ impl TierList {
 
     fn render_title(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let (tx, ty, tw, th) = Self::toggle_box().scaled(s);
-        ctx.label(c, &format!("Tavern Tier {}", self.tier), 12.0 * s, 15.0 * s, 14.0, Weight::Bold, GOLD, Align::Left);
+        ctx.label(c, &format!("Tavern Tier {}", self.tier), 12.0 * s, 15.0 * s, 14.0, Weight::Bold, t.gold, Align::Left);
         let subtitle = ctx.fonts.fit(&self.subtitle, 10.0 * s, Weight::Medium, tx - 18.0 * s);
-        ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, DIM, Align::Left);
+        ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
         // "Lobby only" toggle: hides tribes that are not in this lobby.
         let hover = self.hover == Some(TierHit::LobbyToggle);
-        c.rrect(tx, ty, tw, th, 5.0 * s, if hover { BUTTON_HOVER } else { BUTTON });
+        c.rrect(tx, ty, tw, th, 5.0 * s, if hover { t.button_hover } else { t.button });
         let bx = tx + 7.0 * s;
         let b = 12.0 * s;
         let by = ty + (th - b) / 2.0;
         if self.hide_unavailable {
-            c.rrect(bx, by, b, b, 3.0 * s, ACCENT);
-            c.rrect(bx + 3.0 * s, by + 3.0 * s, b - 6.0 * s, b - 6.0 * s, 1.5 * s, TEXT);
+            c.rrect(bx, by, b, b, 3.0 * s, t.accent);
+            c.rrect(bx + 3.0 * s, by + 3.0 * s, b - 6.0 * s, b - 6.0 * s, 1.5 * s, t.on_accent);
         } else {
-            c.stroke_rrect(bx, by, b, b, 3.0 * s, 1.5 * s, DIM);
+            c.stroke_rrect(bx, by, b, b, 3.0 * s, 1.5 * s, t.dim);
         }
-        let color = if self.hide_unavailable { TEXT } else { DIM };
+        let color = if self.hide_unavailable { t.text } else { t.dim };
         ctx.label(c, "Lobby only", bx + b + 6.0 * s, ty + th / 2.0, 10.5, Weight::Bold, color, Align::Left);
     }
 
     fn render_filter(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let (x, y, w, h) = Self::filter_box().scaled(s);
         let active = self.keyword.is_some();
         let hover = matches!(self.hover, Some(TierHit::FilterBar | TierHit::FilterClear));
         let fill = match (active, hover) {
-            (true, _) => ACCENT,
-            (false, true) => BUTTON_HOVER,
-            (false, false) => BUTTON,
+            (true, _) => t.accent,
+            (false, true) => t.button_hover,
+            (false, false) => t.button,
         };
         c.rrect(x, y, w, h, 5.0 * s, fill);
         let cy = y + h / 2.0;
-        ctx.label(c, "Keyword", x + 9.0 * s, cy, 10.5, Weight::Bold, if active { TEXT } else { DIM }, Align::Left);
+        let on_color = if active { t.on_accent } else { t.dim };
+        ctx.label(c, "Keyword", x + 9.0 * s, cy, 10.5, Weight::Bold, on_color, Align::Left);
         let value_x = x + 66.0 * s;
-        ctx.label(c, self.keyword_label(), value_x, cy, 12.0, Weight::Bold, TEXT, Align::Left);
+        ctx.label(c, self.keyword_label(), value_x, cy, 12.0, Weight::Bold, if active { t.on_accent } else { t.text }, Align::Left);
         if active {
             let clear_hover = self.hover == Some(TierHit::FilterClear);
             let cx = x + w - Self::CLEAR_W * s / 2.0;
             if clear_hover {
-                c.circle(cx, cy, 8.5 * s, Rgba(255, 255, 255, 50));
+                c.circle(cx, cy, 8.5 * s, t.tint);
             }
-            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, TEXT, Align::Center);
+            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, t.on_accent, Align::Center);
         } else {
             // Disclosure arrow: down when closed, up when open.
             let (ax, aw, ah) = (x + w - 16.0 * s, 8.0 * s, 4.5 * s);
             let (tip, base) = if self.filter_open { (cy - ah / 2.0, cy + ah / 2.0) } else { (cy + ah / 2.0, cy - ah / 2.0) };
-            c.triangle([(ax - aw / 2.0, base), (ax + aw / 2.0, base), (ax, tip)], DIM);
+            c.triangle([(ax - aw / 2.0, base), (ax + aw / 2.0, base), (ax, tip)], t.dim);
         }
         if !self.filter_open {
             return;
@@ -545,11 +593,11 @@ impl TierList {
             let selected = keyword == self.keyword;
             let hover = self.hover == Some(TierHit::Keyword(keyword));
             let fill = if selected {
-                ACCENT
+                t.accent
             } else if hover {
-                BUTTON_HOVER
+                t.button_hover
             } else {
-                BUTTON
+                t.button
             };
             c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
             let label = keyword.map(|k| KEYWORDS[k].label).unwrap_or("Any");
@@ -559,11 +607,21 @@ impl TierList {
                 px -= 0.5;
             }
             let label = ctx.fonts.fit(label, px * s, Weight::Bold, cw - 6.0 * s);
-            let color = if selected || hover { TEXT } else { Rgba(200, 208, 228, 255) };
+            let color = if selected {
+                t.on_accent
+            } else if hover {
+                t.text
+            } else {
+                t.soft
+            };
             ctx.label(c, &label, cx + cw / 2.0, cy + ch / 2.0, px, Weight::Bold, color, Align::Center);
         }
     }
 }
+
+/// Badges (gold costs, placements, comp tiers) keep bright fills with dark
+/// text in every theme.
+const BADGE_GOLD: Rgba = Rgba(242, 193, 78, 255);
 
 // ---- meta comps ----------------------------------------------------------
 
@@ -713,37 +771,39 @@ impl CompPanel {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let w = c.width();
         ctx.panel(c);
         self.render_items(c, ctx);
         // Header drawn last so scrolled items slide under it.
         let hh = Self::TITLE * s;
         if ctx.opaque {
-            c.rect(0.0, 0.0, w, hh, BG_OPAQUE);
+            c.rect(0.0, 0.0, w, hh, t.bg_opaque);
         } else {
-            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, BG_OPAQUE);
-            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, BG_OPAQUE);
+            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, t.bg_opaque);
+            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, t.bg_opaque);
         }
         self.render_header(c, ctx);
-        c.rect(0.0, hh - 1.0, w, 1.0, BORDER);
+        c.rect(0.0, hh - 1.0, w, 1.0, t.border);
         let max_scroll = self.max_scroll(s, c.height() as i32);
         if max_scroll > 0.0 {
             let track = c.height() - hh - 8.0 * s;
             let thumb = (track * c.height() / (self.content_h() * s)).max(20.0 * s);
             let ty = hh + 4.0 * s + (track - thumb) * (self.scroll / max_scroll);
-            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, Rgba(255, 255, 255, 90));
+            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, t.scrollbar);
         }
     }
 
     fn render_header(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         // Left edge of the title and right edge of the room it has.
         let (tx, right) = match self.detail {
             Some(letter) => {
                 let (bx, by, bw, bh) = Self::back_box().scaled(s);
-                c.rrect(bx, by, bw, bh, 5.0 * s, if self.hover == Some(CompHit::Back) { BUTTON_HOVER } else { BUTTON });
+                c.rrect(bx, by, bw, bh, 5.0 * s, if self.hover == Some(CompHit::Back) { t.button_hover } else { t.button });
                 let (cx, cy, a) = (bx + bw / 2.0, by + bh / 2.0, 5.0 * s);
-                c.triangle([(cx + a * 0.6, cy - a), (cx + a * 0.6, cy + a), (cx - a * 0.7, cy)], TEXT);
+                c.triangle([(cx + a * 0.6, cy - a), (cx + a * 0.6, cy + a), (cx - a * 0.7, cy)], t.text);
                 let tx = bx + bw + 9.0 * s;
                 let b = 26.0 * s;
                 let bx = c.width() - b - 10.0 * s;
@@ -754,31 +814,32 @@ impl CompPanel {
             None => {
                 let (bx, by, bw, bh) = Self::toggle_box().scaled(s);
                 let hover = self.hover == Some(CompHit::LobbyToggle);
-                c.rrect(bx, by, bw, bh, 5.0 * s, if hover { BUTTON_HOVER } else { BUTTON });
+                c.rrect(bx, by, bw, bh, 5.0 * s, if hover { t.button_hover } else { t.button });
                 let b = 12.0 * s;
                 let (cx, cy) = (bx + 7.0 * s, by + (bh - b) / 2.0);
                 if self.hide_unavailable {
-                    c.rrect(cx, cy, b, b, 3.0 * s, ACCENT);
-                    c.rrect(cx + 3.0 * s, cy + 3.0 * s, b - 6.0 * s, b - 6.0 * s, 1.5 * s, TEXT);
+                    c.rrect(cx, cy, b, b, 3.0 * s, t.accent);
+                    c.rrect(cx + 3.0 * s, cy + 3.0 * s, b - 6.0 * s, b - 6.0 * s, 1.5 * s, t.on_accent);
                 } else {
-                    c.stroke_rrect(cx, cy, b, b, 3.0 * s, 1.5 * s, DIM);
+                    c.stroke_rrect(cx, cy, b, b, 3.0 * s, 1.5 * s, t.dim);
                 }
-                let color = if self.hide_unavailable { TEXT } else { DIM };
+                let color = if self.hide_unavailable { t.text } else { t.dim };
                 ctx.label(c, "Lobby only", cx + b + 6.0 * s, by + bh / 2.0, 10.5, Weight::Bold, color, Align::Left);
                 (12.0 * s, bx - 8.0 * s)
             }
         };
         let title = ctx.fonts.fit(&self.title, 14.0 * s, Weight::Bold, right - tx);
-        ctx.label(c, &title, tx, 16.0 * s, 14.0, Weight::Bold, GOLD, Align::Left);
+        ctx.label(c, &title, tx, 16.0 * s, 14.0, Weight::Bold, t.gold, Align::Left);
         let subtitle = ctx.fonts.fit(&self.subtitle, 10.0 * s, Weight::Medium, right - tx);
-        ctx.label(c, &subtitle, tx, 33.0 * s, 10.0, Weight::Medium, DIM, Align::Left);
+        ctx.label(c, &subtitle, tx, 33.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
     }
 
     fn render_items(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let x = Self::PAD * s;
         let iw = c.width() - 2.0 * Self::PAD * s;
-        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
+        let base = if ctx.opaque { t.bg_opaque } else { t.row };
         for (i, item, top) in self.tops() {
             let y = top * s - self.scroll;
             let h = item.height() * s;
@@ -790,15 +851,15 @@ impl CompPanel {
             match item {
                 CompItem::Tier { letter, count } => {
                     let color = comp_tier_color(letter);
-                    c.rect(x, y + 2.0 * s, iw, h - 2.0 * s, HEADER);
+                    c.rect(x, y + 2.0 * s, iw, h - 2.0 * s, t.header);
                     let b = 18.0 * s;
                     let cy = cy + 1.0 * s;
                     c.rrect(x + 6.0 * s, cy - b / 2.0, b, b, 4.0 * s, color);
                     ctx.label(c, letter, x + 6.0 * s + b / 2.0, cy, 12.0, Weight::Bold, Rgba(30, 20, 10, 255), Align::Center);
-                    ctx.label(c, &format!("{letter} tier"), x + 32.0 * s, cy, 12.5, Weight::Bold, TEXT, Align::Left);
+                    ctx.label(c, &format!("{letter} tier"), x + 32.0 * s, cy, 12.5, Weight::Bold, t.text, Align::Left);
                     let n = format!("{count} comp{}", if *count == 1 { "" } else { "s" });
                     let nw = ctx.fonts.measure(&n, 10.0 * s, Weight::Medium);
-                    ctx.label(c, &n, x + iw - nw - 10.0 * s, cy, 10.0, Weight::Medium, DIM, Align::Left);
+                    ctx.label(c, &n, x + iw - nw - 10.0 * s, cy, 10.0, Weight::Medium, t.dim, Align::Left);
                 }
                 CompItem::Comp(row) => {
                     let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
@@ -808,30 +869,30 @@ impl CompPanel {
                     }
                     c.rect(x, ry, 4.0 * s, rh, if row.dim { row.color.alpha(110) } else { row.color });
                     if hover {
-                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
-                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                        c.rect(x, ry, iw, rh, t.tint);
+                        c.rect(x, ry, 3.0 * s, rh, t.gold);
                     }
                     if row.your_hero {
-                        c.rect(x + iw - 3.0 * s, ry, 3.0 * s, rh, GOLD);
+                        c.rect(x + iw - 3.0 * s, ry, 3.0 * s, rh, t.gold);
                     }
                     let max = iw - 40.0 * s;
                     let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Bold, max);
-                    ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, if row.dim { DIM } else { TEXT });
+                    ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, if row.dim { t.dim } else { t.text });
                     let detail = ctx.fonts.fit(&row.detail, 10.0 * s, Weight::Medium, max);
-                    ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, Rgba(180, 190, 215, 255));
+                    ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, t.soft);
                     if row.trend != 0 {
                         let (ax, a) = (x + iw - 14.0 * s, 4.5 * s);
                         c.circle(ax, cy, 8.5 * s, Rgba(0, 0, 0, 170));
                         let (tip, foot, color) =
-                            if row.trend > 0 { (cy - a, cy + a * 0.8, WIN) } else { (cy + a, cy - a * 0.8, LOSS) };
+                            if row.trend > 0 { (cy - a, cy + a * 0.8, t.win) } else { (cy + a, cy - a * 0.8, t.loss) };
                         c.triangle([(ax - a, foot), (ax + a, foot), (ax, tip)], color);
                     }
                 }
                 CompItem::Heading(text) => {
-                    ctx.label(c, text, x + 8.0 * s, cy + 3.0 * s, 10.0, Weight::Bold, GOLD.alpha(220), Align::Left);
+                    ctx.label(c, text, x + 8.0 * s, cy + 3.0 * s, 10.0, Weight::Bold, t.gold.alpha(220), Align::Left);
                 }
                 CompItem::Text { text, strong } => {
-                    let color = if *strong { TEXT } else { Rgba(205, 212, 230, 255) };
+                    let color = if *strong { t.text } else { t.soft };
                     let weight = if *strong { Weight::Bold } else { Weight::Medium };
                     ctx.label(c, text, x + 8.0 * s, cy, Self::TEXT_PX, weight, color, Align::Left);
                 }
@@ -839,38 +900,38 @@ impl CompPanel {
                     let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
                     ctx.tile_row(c, card_id, x, ry, iw, rh, base);
                     if hover {
-                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
-                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                        c.rect(x, ry, iw, rh, t.tint);
+                        c.rect(x, ry, 3.0 * s, rh, t.gold);
                     }
                     let name = ctx.fonts.fit(name, 12.0 * s, Weight::Medium, iw - 44.0 * s);
-                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, TEXT);
+                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, t.text);
                     if *tier > 0 {
                         let tx = x + iw - 14.0 * s;
                         c.circle(tx, cy, 9.5 * s, Rgba(0, 0, 0, 170));
-                        c.circle(tx, cy, 8.5 * s, ACCENT);
-                        ctx.label(c, &tier.to_string(), tx, cy, 11.0, Weight::Bold, TEXT, Align::Center);
+                        c.circle(tx, cy, 8.5 * s, t.accent);
+                        ctx.label(c, &tier.to_string(), tx, cy, 11.0, Weight::Bold, t.on_accent, Align::Center);
                     }
                 }
                 CompItem::Hero { card_id, name, detail, yours } => {
                     let (ry, rh) = (y + 1.0 * s, h - 1.0 * s);
                     ctx.tile_row(c, card_id, x, ry, iw, rh, base);
                     if *yours {
-                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                        c.rect(x, ry, 3.0 * s, rh, t.gold);
                     }
                     if hover {
-                        c.rect(x, ry, iw, rh, Rgba(255, 255, 255, 28));
-                        c.rect(x, ry, 3.0 * s, rh, GOLD);
+                        c.rect(x, ry, iw, rh, t.tint);
+                        c.rect(x, ry, 3.0 * s, rh, t.gold);
                     }
                     let dw = ctx.fonts.measure(detail, 10.5 * s, Weight::Bold);
                     let dx = x + iw - dw - 12.0 * s;
                     c.rrect(dx - 6.0 * s, cy - 8.5 * s, dw + 12.0 * s, 17.0 * s, 8.5 * s, Rgba(0, 0, 0, 185));
                     let name = ctx.fonts.fit(name, 12.0 * s, Weight::Medium, dx - x - 18.0 * s);
-                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, if *yours { GOLD } else { TEXT });
-                    ctx.label(c, detail, dx, cy, 10.5, Weight::Bold, TEXT, Align::Left);
+                    ctx.label_shadow(c, &name, x + 9.0 * s, cy, 12.0, Weight::Medium, if *yours { t.gold } else { t.text });
+                    ctx.label(c, detail, dx, cy, 10.5, Weight::Bold, t.on_accent, Align::Left);
                 }
                 CompItem::Note(text) => {
                     let text = ctx.fonts.fit(text, 11.5 * s, Weight::Medium, iw - 16.0 * s);
-                    ctx.label(c, &text, c.width() / 2.0, cy, 11.5, Weight::Medium, DIM, Align::Center);
+                    ctx.label(c, &text, c.width() / 2.0, cy, 11.5, Weight::Medium, t.dim, Align::Center);
                 }
                 CompItem::Gap => {}
             }
@@ -1021,52 +1082,54 @@ impl SearchPanel {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let w = c.width();
         ctx.panel(c);
         self.render_rows(c, ctx);
         // Header drawn last so scrolled rows slide under it.
         let hh = Self::header_h() * s;
         if ctx.opaque {
-            c.rect(0.0, 0.0, w, hh, BG_OPAQUE);
+            c.rect(0.0, 0.0, w, hh, t.bg_opaque);
         } else {
-            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, BG_OPAQUE);
-            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, BG_OPAQUE);
+            c.rrect(0.0, 0.0, w, 16.0 * s, 8.0 * s, t.bg_opaque);
+            c.rect(0.0, 8.0 * s, w, hh - 8.0 * s, t.bg_opaque);
         }
-        ctx.label(c, "Card Search", 12.0 * s, 15.0 * s, 14.0, Weight::Bold, GOLD, Align::Left);
+        ctx.label(c, "Card Search", 12.0 * s, 15.0 * s, 14.0, Weight::Bold, t.gold, Align::Left);
         let subtitle = ctx.fonts.fit(&self.subtitle, 10.0 * s, Weight::Medium, w - 24.0 * s);
-        ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, DIM, Align::Left);
+        ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
         self.render_field(c, ctx);
         self.render_chips(c, ctx);
-        c.rect(0.0, hh - 1.0, w, 1.0, BORDER);
+        c.rect(0.0, hh - 1.0, w, 1.0, t.border);
         let max_scroll = self.max_scroll(s, c.height() as i32);
         if max_scroll > 0.0 {
             let track = c.height() - hh - 8.0 * s;
             let thumb = (track * c.height() / (self.content_h() * s)).max(20.0 * s);
             let ty = hh + 4.0 * s + (track - thumb) * (self.scroll / max_scroll);
-            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, Rgba(255, 255, 255, 90));
+            c.rrect(w - 4.0 * s, ty, 2.5 * s, thumb, 1.5 * s, t.scrollbar);
         }
     }
 
     fn render_field(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let (x, y, w, h) = Self::field_box().scaled(s);
         let cy = y + h / 2.0;
         let hover = matches!(self.hover, Some(SearchHit::Field | SearchHit::Clear));
-        c.rrect(x, y, w, h, 5.0 * s, if hover && !self.focused { BUTTON_HOVER } else { Rgba(8, 10, 18, 255) });
-        let border = if self.focused { ACCENT } else { BORDER };
+        c.rrect(x, y, w, h, 5.0 * s, if hover && !self.focused { t.button_hover } else { t.field });
+        let border = if self.focused { t.accent } else { t.border };
         c.stroke_rrect(x, y, w, h, 5.0 * s, if self.focused { 1.5 * s } else { 1.0 }, border);
         // Magnifier: a ring and its handle.
         let (mx, my, r) = (x + 13.0 * s, cy - 1.5 * s, 4.5 * s);
-        c.stroke_rrect(mx - r, my - r, 2.0 * r, 2.0 * r, r, 1.6 * s, DIM);
-        let (hx, hy, t) = (mx + r * 0.7, my + r * 0.7, 1.1 * s);
-        c.triangle([(hx - t, hy + t), (hx + t, hy - t), (hx + 4.0 * s, hy + 4.0 * s)], DIM);
-        c.triangle([(hx - t, hy + t), (hx + 4.0 * s, hy + 4.0 * s), (hx + 4.0 * s - t, hy + 4.0 * s + t)], DIM);
+        c.stroke_rrect(mx - r, my - r, 2.0 * r, 2.0 * r, r, 1.6 * s, t.dim);
+        let (hx, hy, handle) = (mx + r * 0.7, my + r * 0.7, 1.1 * s);
+        c.triangle([(hx - handle, hy + handle), (hx + handle, hy - handle), (hx + 4.0 * s, hy + 4.0 * s)], t.dim);
+        c.triangle([(hx - handle, hy + handle), (hx + 4.0 * s, hy + 4.0 * s), (hx + 4.0 * s - handle, hy + 4.0 * s + handle)], t.dim);
         let tx = x + 26.0 * s;
         let room = w - 26.0 * s - if self.query.is_empty() { 8.0 * s } else { Self::CLEAR_W * s };
         let px = 12.5 * s;
         if self.query.is_empty() {
             let hint = if self.focused { "Type a card name…" } else { "Click to search cards" };
-            ctx.label(c, hint, tx, cy, 12.0, Weight::Medium, DIM.alpha(200), Align::Left);
+            ctx.label(c, hint, tx, cy, 12.0, Weight::Medium, t.dim.alpha(200), Align::Left);
         } else {
             // Keep the end of a long query, where the caret is.
             let mut shown = self.query.clone();
@@ -1075,51 +1138,59 @@ impl SearchPanel {
             }
             let text = if shown.len() < self.query.len() { format!("…{shown}") } else { shown };
             let tw = ctx.fonts.measure(&text, px, Weight::Medium);
-            ctx.label(c, &text, tx, cy, 12.5, Weight::Medium, TEXT, Align::Left);
+            ctx.label(c, &text, tx, cy, 12.5, Weight::Medium, t.text, Align::Left);
             if self.focused {
-                c.rect(tx + tw + 1.5 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, TEXT);
+                c.rect(tx + tw + 1.5 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, t.text);
             }
             let cx = x + w - Self::CLEAR_W * s / 2.0;
             if self.hover == Some(SearchHit::Clear) {
-                c.circle(cx, cy, 8.5 * s, Rgba(255, 255, 255, 50));
+                c.circle(cx, cy, 8.5 * s, t.tint);
             }
-            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, TEXT, Align::Center);
+            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, t.text, Align::Center);
             return;
         }
         if self.focused {
-            c.rect(tx - 1.0 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, TEXT);
+            c.rect(tx - 1.0 * s, cy - 8.0 * s, 1.5 * s, 16.0 * s, t.text);
         }
     }
 
     fn render_chips(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         for (i, k) in Self::chips().enumerate() {
             let (cx, cy, cw, ch) = Self::chip_box(i).scaled(s);
             let selected = k == self.category;
             let hover = self.hover == Some(SearchHit::Category(k));
             let fill = if selected {
-                ACCENT
+                t.accent
             } else if hover {
-                BUTTON_HOVER
+                t.button_hover
             } else {
-                BUTTON
+                t.button
             };
             c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
             let label = k.map(Category::label).unwrap_or("All");
-            let color = if selected || hover { TEXT } else { Rgba(200, 208, 228, 255) };
+            let color = if selected {
+                t.on_accent
+            } else if hover {
+                t.text
+            } else {
+                t.soft
+            };
             ctx.label(c, label, cx + cw / 2.0, cy + ch / 2.0, 10.0, Weight::Bold, color, Align::Center);
         }
     }
 
     fn render_rows(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         let x = Self::PAD * s;
         let iw = c.width() - 2.0 * Self::PAD * s;
-        let base = if ctx.opaque { BG_OPAQUE } else { Rgba(16, 20, 34, 255) };
+        let base = if ctx.opaque { t.bg_opaque } else { t.row };
         let top = Self::header_h() * s - self.scroll;
         if self.rows.is_empty() {
             let note = ctx.fonts.fit(&self.note, 11.5 * s, Weight::Medium, iw - 16.0 * s);
-            ctx.label(c, &note, c.width() / 2.0, top + Self::ROW * s / 2.0, 11.5, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, &note, c.width() / 2.0, top + Self::ROW * s / 2.0, 11.5, Weight::Medium, t.dim, Align::Center);
             return;
         }
         let rh = Self::ROW * s;
@@ -1133,26 +1204,26 @@ impl SearchPanel {
             ctx.tile_row(c, &row.card_id, x, ry, iw, h, base);
             c.rect(x, ry, 4.0 * s, h, row.color);
             if self.hover == Some(SearchHit::Row(i)) {
-                c.rect(x, ry, iw, h, Rgba(255, 255, 255, 28));
-                c.rect(x, ry, 3.0 * s, h, GOLD);
+                c.rect(x, ry, iw, h, t.tint);
+                c.rect(x, ry, 3.0 * s, h, t.gold);
             }
             let max = iw - if row.tier > 0 { 40.0 * s } else { 18.0 * s };
             let name = ctx.fonts.fit(&row.name, 12.5 * s, Weight::Bold, max);
-            ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, TEXT);
+            ctx.label_shadow(c, &name, x + 11.0 * s, cy - 7.0 * s, 12.5, Weight::Bold, t.text);
             let detail = ctx.fonts.fit(&row.detail, 10.0 * s, Weight::Medium, max);
-            ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, Rgba(180, 190, 215, 255));
+            ctx.label_shadow(c, &detail, x + 11.0 * s, cy + 8.0 * s, 10.0, Weight::Medium, t.soft);
             if row.tier > 0 {
                 let tx = x + iw - 14.0 * s;
                 c.circle(tx, cy, 9.5 * s, Rgba(0, 0, 0, 170));
-                c.circle(tx, cy, 8.5 * s, ACCENT);
-                ctx.label(c, &row.tier.to_string(), tx, cy, 11.0, Weight::Bold, TEXT, Align::Center);
+                c.circle(tx, cy, 8.5 * s, t.accent);
+                ctx.label(c, &row.tier.to_string(), tx, cy, 11.0, Weight::Bold, t.on_accent, Align::Center);
             }
         }
         if self.more > 0 {
             let y = top + self.rows.len() as f32 * rh + Self::FOOT * s / 2.0;
             let msg = format!("+{} more · keep typing to narrow down", self.more);
             let msg = ctx.fonts.fit(&msg, 10.5 * s, Weight::Medium, iw - 16.0 * s);
-            ctx.label(c, &msg, c.width() / 2.0, y, 10.5, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, &msg, c.width() / 2.0, y, 10.5, Weight::Medium, t.dim, Align::Center);
         }
     }
 }
@@ -1204,24 +1275,25 @@ impl SimPanel {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         ctx.panel(c);
         let col_w = Self::W * s / 5.0;
         let fade = |c: Rgba, dim: bool| if dim { c.alpha(150) } else { c };
         let cols: [(&str, Option<f32>, Rgba); 5] = [
-            ("LETHAL", self.odds.map(|o| o.won_lethal), WIN_LETHAL),
-            ("WIN", self.odds.map(|o| o.won), WIN),
-            ("TIE", self.odds.map(|o| o.tied), TIE),
-            ("LOSS", self.odds.map(|o| o.lost), LOSS),
-            ("LETHAL", self.odds.map(|o| o.lost_lethal), LOSS_LETHAL),
+            ("LETHAL", self.odds.map(|o| o.won_lethal), t.win_lethal),
+            ("WIN", self.odds.map(|o| o.won), t.win),
+            ("TIE", self.odds.map(|o| o.tied), t.tie),
+            ("LOSS", self.odds.map(|o| o.lost), t.loss),
+            ("LETHAL", self.odds.map(|o| o.lost_lethal), t.loss_lethal),
         ];
         for (i, (label, value, color)) in cols.iter().enumerate() {
             let cx = col_w * (i as f32 + 0.5);
             let lethal = i == 0 || i == 4;
-            let label_color = if lethal { DIM.alpha(170) } else { DIM };
+            let label_color = if lethal { t.dim.alpha(170) } else { t.dim };
             ctx.label(c, label, cx, 13.0 * s, 9.5, Weight::Bold, fade(label_color, self.dim), Align::Center);
             let text = value.map(percent).unwrap_or_else(|| "–".into());
             let zero = value.is_none_or(|v| v <= 0.0);
-            let vc = if lethal && zero { DIM } else { *color };
+            let vc = if lethal && zero { t.dim } else { *color };
             let px = if lethal { 15.0 } else { 19.0 };
             ctx.label(c, &text, cx, 33.0 * s, px, Weight::Bold, fade(vc, self.dim), Align::Center);
         }
@@ -1232,13 +1304,13 @@ impl SimPanel {
         };
         let max = Self::W * s - 16.0 * s;
         let footer = ctx.fonts.fit(&footer, 10.5 * s, Weight::Medium, max);
-        let fc = if self.note.is_some() { LOSS.alpha(220) } else { DIM };
+        let fc = if self.note.is_some() { t.loss.alpha(220) } else { t.dim };
         ctx.label(c, &footer, Self::W * s / 2.0, 52.0 * s, 10.5, Weight::Medium, fc, Align::Center);
         if let Some(o) = self.odds {
             let (x0, y, w, h) = (10.0 * s, (Self::H - 9.0) * s, (Self::W - 20.0) * s, 3.0 * s);
             let total = (o.won + o.tied + o.lost).max(0.001);
             let mut x = x0;
-            for (v, col) in [(o.won, WIN), (o.tied, TIE), (o.lost, LOSS)] {
+            for (v, col) in [(o.won, t.win), (o.tied, t.tie), (o.lost, t.loss)] {
                 let seg = w * v / total;
                 if seg > 0.0 {
                     c.rect(x, y, seg, h, fade(col, self.dim));
@@ -1262,10 +1334,16 @@ pub struct InfoPanel {
     pub width: f32,
 }
 
-pub fn place_color(place: i32) -> Rgba {
+pub fn place_color(place: i32, theme: &Theme) -> Rgba {
     match place {
-        1 => GOLD,
-        2..=4 => WIN,
+        1 => BADGE_GOLD,
+        2..=4 => {
+            if theme.bg == Theme::HIGH_CONTRAST.bg {
+                theme.win
+            } else {
+                Rgba(102, 187, 106, 255)
+            }
+        }
         _ => Rgba(120, 128, 150, 255),
     }
 }
@@ -1294,46 +1372,48 @@ impl InfoPanel {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         ctx.panel(c);
         let x = Self::PAD * s;
         let w = (self.width - 2.0 * Self::PAD) * s;
         let mut y = Self::PAD * s;
-        ctx.label(c, "AVAILABLE TRIBES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, DIM, Align::Left);
+        ctx.label(c, "AVAILABLE TRIBES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, t.dim, Align::Left);
         y += Self::TITLE * s;
         for i in 0..self.slots {
             let h = Self::CHIP * s;
             match self.tribes.get(i) {
-                Some(&t) => {
-                    c.rrect(x, y, w, h, 4.0 * s, tribe_color(t));
-                    ctx.label_shadow(c, t.label(), x + 8.0 * s, y + h / 2.0, 12.0, Weight::Bold, TEXT);
+                Some(&tribe) => {
+                    c.rrect(x, y, w, h, 4.0 * s, tribe_color(tribe));
+                    // Light text on the bright tribe fill, as on every badge.
+                    ctx.label_shadow_on(c, tribe.label(), x + 8.0 * s, y + h / 2.0, 12.0, Weight::Bold, t.on_accent, Rgba(0, 0, 0, 200));
                 }
                 None => {
-                    c.rrect(x, y, w, h, 4.0 * s, BUTTON);
-                    ctx.label(c, "?", x + w / 2.0, y + h / 2.0, 12.0, Weight::Bold, DIM, Align::Center);
+                    c.rrect(x, y, w, h, 4.0 * s, t.button);
+                    ctx.label(c, "?", x + w / 2.0, y + h / 2.0, 12.0, Weight::Bold, t.dim, Align::Center);
                 }
             }
             y += h + 3.0 * s;
         }
         y += 6.0 * s;
-        ctx.label(c, "LATEST GAMES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, DIM, Align::Left);
+        ctx.label(c, "LATEST GAMES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, t.dim, Align::Left);
         y += Self::TITLE * s;
         if self.games.is_empty() {
-            ctx.label(c, "No games yet", x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, DIM, Align::Left);
+            ctx.label(c, "No games yet", x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
             y += Self::GAME * s;
         }
         for (hero, place) in &self.games {
             let cy = y + Self::GAME * s / 2.0;
             let r = 8.0 * s;
-            c.circle(x + r, cy, r, place_color(*place));
+            c.circle(x + r, cy, r, place_color(*place, &t));
             ctx.label(c, &place.to_string(), x + r, cy, 10.5, Weight::Bold, Rgba(15, 18, 28, 255), Align::Center);
             let name = ctx.fonts.fit(hero, 11.5 * s, Weight::Medium, w - 2.0 * r - 6.0 * s);
-            ctx.label(c, &name, x + 2.0 * r + 6.0 * s, cy, 11.5, Weight::Medium, TEXT, Align::Left);
+            ctx.label(c, &name, x + 2.0 * r + 6.0 * s, cy, 11.5, Weight::Medium, t.text, Align::Left);
             y += Self::GAME * s;
         }
         if let Some((n, avg)) = self.session {
             let text = format!("Session: {n} · avg {avg:.1}");
             let text = ctx.fonts.fit(&text, 11.0 * s, Weight::Medium, w);
-            ctx.label(c, &text, x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, DIM, Align::Left);
+            ctx.label(c, &text, x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
         }
     }
 }
@@ -1451,25 +1531,26 @@ impl OpponentPopup {
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         ctx.panel(c);
         let w = c.width();
         let x = Self::PAD * s;
         let iw = w - 2.0 * Self::PAD * s;
         // Header: hero art strip behind the name.
         let hh = (Self::HEAD - Self::PAD) * s;
-        ctx.tile_row(c, &self.hero_card_id, x, x, iw, hh, HEADER);
+        ctx.tile_row(c, &self.hero_card_id, x, x, iw, hh, t.header);
         let name = ctx.fonts.fit(&self.hero, 14.0 * s, Weight::Bold, iw - 20.0 * s);
-        ctx.label_shadow(c, &name, x + 10.0 * s, x + 15.0 * s, 14.0, Weight::Bold, TEXT);
+        ctx.label_shadow(c, &name, x + 10.0 * s, x + 15.0 * s, 14.0, Weight::Bold, t.text);
         let faced = self.boards.len();
         let sub = match self.boards.first() {
             Some(b) => format!("Tier {} · faced {faced} time{}", b.tier, if faced == 1 { "" } else { "s" }),
             None => "Not faced yet".to_string(),
         };
         let sub = ctx.fonts.fit(&sub, 11.0 * s, Weight::Medium, iw - 20.0 * s);
-        ctx.label_shadow(c, &sub, x + 10.0 * s, x + 34.0 * s, 11.0, Weight::Medium, DIM);
+        ctx.label_shadow(c, &sub, x + 10.0 * s, x + 34.0 * s, 11.0, Weight::Medium, t.dim);
         let mut y = Self::HEAD * s;
         if self.boards.is_empty() {
-            ctx.label(c, "No board seen yet", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, "No board seen yet", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, t.dim, Align::Center);
             return;
         }
         self.render_chips(c, ctx);
@@ -1480,48 +1561,56 @@ impl OpponentPopup {
             any = true;
         }
         if !any {
-            ctx.label(c, "Click a turn to show its board", w / 2.0, y + Self::ROW * s / 2.0, 11.5, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, "Click a turn to show its board", w / 2.0, y + Self::ROW * s / 2.0, 11.5, Weight::Medium, t.dim, Align::Center);
         }
         if self.hidden > 0 {
             let msg = format!("+{} older board{} not shown", self.hidden, if self.hidden == 1 { "" } else { "s" });
-            ctx.label(c, &msg, w / 2.0, y + Self::MORE * s / 2.0, 10.5, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, &msg, w / 2.0, y + Self::MORE * s / 2.0, 10.5, Weight::Medium, t.dim, Align::Center);
         }
     }
 
     fn render_chips(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
+        let t = ctx.theme;
         for (i, b) in self.boards.iter().enumerate() {
             let (cx, cy, cw, ch) = Self::chip_box(i).scaled(s);
             let on = self.shown[i];
             let hover = self.hover == Some(i);
             let fill = match (on, hover) {
-                (true, _) => ACCENT,
-                (false, true) => BUTTON_HOVER,
-                (false, false) => BUTTON,
+                (true, _) => t.accent,
+                (false, true) => t.button_hover,
+                (false, false) => t.button,
             };
             c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
             if hover && on {
-                c.rrect(cx, cy, cw, ch, 4.0 * s, Rgba(255, 255, 255, 30));
+                c.rrect(cx, cy, cw, ch, 4.0 * s, t.tint);
             }
             // The latest board gets the same gold mark as its header.
             if i == 0 {
-                c.rect(cx + 3.0 * s, cy + ch - 3.0 * s, cw - 6.0 * s, 1.5 * s, GOLD);
+                c.rect(cx + 3.0 * s, cy + ch - 3.0 * s, cw - 6.0 * s, 1.5 * s, t.gold);
             }
-            let color = if on || hover { TEXT } else { Rgba(160, 170, 195, 255) };
+            let color = if on {
+                t.on_accent
+            } else if hover {
+                t.text
+            } else {
+                t.soft
+            };
             ctx.label(c, &format!("T{}", b.turn), cx + cw / 2.0, cy + ch / 2.0, 10.5, Weight::Bold, color, Align::Center);
         }
     }
 
     fn render_board(&self, c: &mut Canvas, ctx: &mut Ctx, b: &BoardView, latest: bool, mut y: f32) -> f32 {
         let s = ctx.s;
+        let t = ctx.theme;
         let x = Self::PAD * s;
         let iw = c.width() - 2.0 * Self::PAD * s;
         let w = c.width();
         // Board header: turn, tier and how long ago.
         let bh = (Self::BOARD_HEAD - 2.0) * s;
         let by = y + 1.0 * s;
-        c.rect(x, by, iw, bh, HEADER);
-        c.rect(x, by, 3.0 * s, bh, if latest { GOLD } else { DIM });
+        c.rect(x, by, iw, bh, t.header);
+        c.rect(x, by, 3.0 * s, bh, if latest { t.gold } else { t.dim });
         let ago = self.turn - b.turn;
         let when = match ago {
             0 => "this turn".to_string(),
@@ -1529,11 +1618,11 @@ impl OpponentPopup {
             n => format!("{n} turns ago"),
         };
         let title = format!("Turn {} · Tier {}", b.turn, b.tier);
-        ctx.label(c, &title, x + 9.0 * s, by + bh / 2.0, 11.5, Weight::Bold, if latest { TEXT } else { Rgba(200, 208, 228, 255) }, Align::Left);
-        ctx.label(c, &when, x + iw - 7.0 * s, by + bh / 2.0, 10.5, Weight::Medium, DIM, Align::Right);
+        ctx.label(c, &title, x + 9.0 * s, by + bh / 2.0, 11.5, Weight::Bold, if latest { t.text } else { t.soft }, Align::Left);
+        ctx.label(c, &when, x + iw - 7.0 * s, by + bh / 2.0, 10.5, Weight::Medium, t.dim, Align::Right);
         y += Self::BOARD_HEAD * s;
         if b.minions.is_empty() {
-            ctx.label(c, "Empty board", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, DIM, Align::Center);
+            ctx.label(c, "Empty board", w / 2.0, y + Self::ROW * s / 2.0, 12.0, Weight::Medium, t.dim, Align::Center);
             return y + Self::ROW * s;
         }
         // Centred like the game centres a board that is not full.
@@ -1551,6 +1640,7 @@ impl OpponentPopup {
     /// health bottom right, keyword effects around it, name below.
     fn render_minion(c: &mut Canvas, ctx: &mut Ctx, m: &MinionView, x: f32, y: f32) {
         let s = ctx.s;
+        let t = ctx.theme;
         let (w, h) = (Self::MINION_W * s, Self::PORTRAIT_H * s);
         let r = w / 2.0;
         let has = |k: &str| m.keywords.contains(&k);
@@ -1572,7 +1662,7 @@ impl OpponentPopup {
         if has("Reborn") {
             c.rrect(x, y, w, h, r, Rgba(110, 220, 255, 60));
         }
-        let frame = if m.golden { GOLD } else { Rgba(96, 84, 70, 255) };
+        let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
         c.stroke_rrect(x, y, w, h, r, 2.0 * s, frame);
         if has("Shield") {
             c.stroke_rrect(x - 2.5 * s, y - 2.5 * s, w + 5.0 * s, h + 5.0 * s, r + 2.5 * s, 3.0 * s, Rgba(255, 214, 90, 210));
@@ -1593,11 +1683,11 @@ impl OpponentPopup {
             let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * s);
             c.circle(cx, cy, 6.5 * s, Rgba(0, 0, 0, 200));
             c.circle(cx, cy, 5.5 * s, *col);
-            ctx.label(c, label, cx, cy, 8.0, Weight::Bold, TEXT, Align::Center);
+            ctx.label(c, label, cx, cy, 8.0, Weight::Bold, t.on_accent, Align::Center);
         }
         // Stats where the game puts them.
         let gy = y + h - 6.0 * s;
-        for (cx, value, color) in [(x + 9.0 * s, m.attack, ATTACK), (x + w - 9.0 * s, m.health, HEALTH)] {
+        for (cx, value, color) in [(x + 9.0 * s, m.attack, t.attack), (x + w - 9.0 * s, m.health, t.health)] {
             c.circle(cx, gy, 11.5 * s, Rgba(0, 0, 0, 220));
             c.circle(cx, gy, 10.0 * s, color);
             let text = value.to_string();
@@ -1606,10 +1696,11 @@ impl OpponentPopup {
                 3 => 10.0,
                 _ => 8.5,
             };
-            c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, TEXT, Align::Center);
+            // The gems are always bright, so their number keeps a dark shadow.
+            c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
         }
         let lines = ctx.fonts.wrap(&m.name, 9.5 * s, Weight::Bold, w + Self::MINION_GAP * s - 2.0 * s);
-        let name_color = if m.golden { GOLD } else { Rgba(220, 224, 236, 255) };
+        let name_color = if m.golden { t.gold } else { t.text };
         for (i, line) in lines.iter().take(2).enumerate() {
             let cy = y + h + 15.0 * s + i as f32 * 11.0 * s;
             ctx.label(c, line, x + w / 2.0, cy, 9.5, Weight::Bold, name_color, Align::Center);
@@ -1638,7 +1729,7 @@ impl CardPreview {
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         if let Some(img) = ctx.images.get(ImageKind::Render, &self.card_id) {
             if ctx.opaque {
-                c.rect(0.0, 0.0, c.width(), c.height(), BG_OPAQUE);
+                c.rect(0.0, 0.0, c.width(), c.height(), ctx.theme.bg_opaque);
             }
             let (w, h) = (c.width(), c.height());
             c.image_cover(&img, 0.0, 0.0, w, h, 0.0, 1.0);
@@ -1657,11 +1748,119 @@ pub struct Calibration {
 
 impl Calibration {
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let gold = ctx.theme.gold;
         for (i, &(x, y, w, h)) in self.slots.iter().enumerate() {
-            let color = if self.hover == Some(i) { GOLD } else { Rgba(80, 220, 255, 255) };
+            let color = if self.hover == Some(i) { gold } else { Rgba(80, 220, 255, 255) };
             c.stroke_rrect(x, y, w, h, 4.0, 2.0, color);
             ctx.label(c, &format!("{}", i + 1), x + 6.0, y + 12.0, 12.0, Weight::Bold, color, Align::Left);
         }
+    }
+}
+
+// ---- settings ------------------------------------------------------------
+
+/// What the pointer is over in the settings panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHit {
+    /// A theme row; index into `ThemeName::ALL`.
+    Theme(usize),
+}
+
+/// In-overlay settings: the theme, applied and saved as soon as it is picked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingsPanel {
+    pub theme: ThemeName,
+    /// Where the choice is written, shown in the footer.
+    pub config_path: String,
+    /// The last save failed; shown instead of the path.
+    pub save_error: Option<String>,
+    pub hover: Option<SettingsHit>,
+}
+
+impl SettingsPanel {
+    pub const W: f32 = TierList::W;
+    const TITLE: f32 = 40.0;
+    const HEADING: f32 = 26.0;
+    const ROW: f32 = 38.0;
+    const FOOT: f32 = 30.0;
+    const PAD: f32 = 4.0;
+    /// Miniature of a palette at the left of its row.
+    const SWATCH_W: f32 = 44.0;
+    const SWATCH_H: f32 = 24.0;
+
+    fn content_h(&self) -> f32 {
+        Self::TITLE + Self::HEADING + ThemeName::ALL.len() as f32 * Self::ROW + Self::FOOT + Self::PAD
+    }
+
+    pub fn size(&self, s: f32, max_h: i32) -> (i32, i32) {
+        (s_ceil(Self::W, s), s_ceil(self.content_h(), s).min(max_h))
+    }
+
+    fn row_box(i: usize) -> Box2 {
+        Box2 {
+            x: Self::PAD + 2.0,
+            y: Self::TITLE + Self::HEADING + i as f32 * Self::ROW,
+            w: Self::W - 2.0 * Self::PAD - 4.0,
+            h: Self::ROW,
+        }
+    }
+
+    /// Theme row under a window-local point.
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<SettingsHit> {
+        let (ux, uy) = (x / s, y / s);
+        (0..ThemeName::ALL.len()).find(|&i| Self::row_box(i).contains(ux, uy)).map(SettingsHit::Theme)
+    }
+
+    pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let t = ctx.theme;
+        ctx.panel(c);
+        let x = (Self::PAD + 2.0) * s;
+        let w = c.width() - 2.0 * x;
+        ctx.label(c, "Settings", 12.0 * s, 15.0 * s, 14.0, Weight::Bold, t.gold, Align::Left);
+        let sub = ctx.fonts.fit("Click a theme to switch right away", 10.0 * s, Weight::Medium, w - 12.0 * s);
+        ctx.label(c, &sub, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
+        ctx.label(c, "THEME", x + 6.0 * s, (Self::TITLE + Self::HEADING / 2.0) * s, 10.0, Weight::Bold, t.dim, Align::Left);
+        for (i, name) in ThemeName::ALL.iter().enumerate() {
+            self.render_theme_row(c, ctx, i, *name);
+        }
+        // Footer: where the choice went, or why it did not.
+        let (text, color) = match &self.save_error {
+            Some(msg) => (format!("Not saved: {msg}"), t.loss),
+            None => (format!("Saved to {}", self.config_path), t.dim),
+        };
+        let text = ctx.fonts.fit(&text, 10.0 * s, Weight::Medium, w);
+        let fy = (Self::TITLE + Self::HEADING + ThemeName::ALL.len() as f32 * Self::ROW + Self::FOOT / 2.0) * s;
+        ctx.label(c, &text, c.width() / 2.0, fy, 10.0, Weight::Medium, color, Align::Center);
+    }
+
+    /// One theme row: a miniature of the palette, its name, and an accent bar
+    /// when it is the active one.
+    fn render_theme_row(&self, c: &mut Canvas, ctx: &mut Ctx, i: usize, name: ThemeName) {
+        let s = ctx.s;
+        let t = ctx.theme;
+        let (x, y, w, _) = Self::row_box(i).scaled(s);
+        let selected = self.theme == name;
+        let hover = self.hover == Some(SettingsHit::Theme(i));
+        let fill = if hover { t.button_hover } else { t.button };
+        c.rrect(x, y + 1.0 * s, w, (Self::ROW - 2.0) * s, 5.0 * s, fill);
+        if selected {
+            c.rrect(x, y + 1.0 * s, 4.0 * s, (Self::ROW - 2.0) * s, 2.0 * s, t.accent);
+        }
+        // The palette itself: panel background, accent block and body text.
+        let pal = name.theme();
+        let (sx, sy) = (x + 10.0 * s, y + (Self::ROW - Self::SWATCH_H) / 2.0 * s);
+        let (sw, sh) = (Self::SWATCH_W * s, Self::SWATCH_H * s);
+        c.rrect(sx, sy, sw, sh, 4.0 * s, pal.bg_opaque);
+        c.stroke_rrect(sx, sy, sw, sh, 4.0 * s, 1.0, pal.border);
+        let a = 16.0 * s;
+        let (ax, ay) = (sx + 4.0 * s, sy + (sh - a) / 2.0);
+        c.rrect(ax, ay, a, a, 3.0 * s, pal.accent);
+        ctx.label(c, "A", ax + a / 2.0, ay + a / 2.0, 10.0, Weight::Bold, pal.on_accent, Align::Center);
+        ctx.label(c, "Aa", ax + a + 6.0 * s, sy + sh / 2.0, 11.5, Weight::Bold, pal.text, Align::Left);
+        let color = if selected || hover { t.text } else { t.soft };
+        let label = ctx.fonts.fit(name.label(), 12.5 * s, Weight::Bold, x + w - (sx + sw) - 12.0 * s);
+        ctx.label(c, &label, sx + sw + 8.0 * s, y + Self::ROW * s / 2.0, 12.5, Weight::Bold, color, Align::Left);
     }
 }
 
@@ -1715,5 +1914,60 @@ mod tests {
         // Nothing toggled on: room for the hint.
         let none = popup(vec![board(9)], vec![false]);
         assert!(none.size(1.0).1 > 0);
+    }
+
+    fn settings() -> SettingsPanel {
+        SettingsPanel {
+            theme: ThemeName::Dark,
+            config_path: "~/.config/hsbg-overlay/config.toml".into(),
+            save_error: None,
+            hover: None,
+        }
+    }
+
+    #[test]
+    fn settings_rows_pick_themes() {
+        let p = settings();
+        let (x, y, w, h) = SettingsPanel::row_box(1).scaled(2.0);
+        assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Theme(1)));
+        assert_eq!(p.hit(4.0, 4.0, 2.0), None, "title band is not clickable");
+        // Three rows fit above the footer, which fits inside the panel.
+        assert_eq!(p.size(1.0, 1000), (252, 214));
+        let (_, y, _, h) = SettingsPanel::row_box(2).scaled(1.0);
+        assert!(y + h < 214.0);
+    }
+
+    #[test]
+    fn place_colors_follow_theme() {
+        assert_eq!(place_color(1, &Theme::DARK), BADGE_GOLD);
+        assert_eq!(place_color(2, &Theme::DARK), Rgba(102, 187, 106, 255));
+        assert_eq!(place_color(2, &Theme::HIGH_CONTRAST), Theme::HIGH_CONTRAST.win);
+        assert_eq!(place_color(8, &Theme::HIGH_CONTRAST), Rgba(120, 128, 150, 255));
+    }
+
+    #[test]
+    fn top_bar_tools_and_settings_hit() {
+        let bar = TopBar {
+            turn: 3,
+            tavern_tier: 2,
+            max_tier: 6,
+            selected: None,
+            hover: None,
+            comps: true,
+            comps_open: false,
+            search: true,
+            search_open: false,
+            settings_open: false,
+        };
+        let tools = bar.tools();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0].0, TopHit::Comps);
+        assert_eq!(tools[1].0, TopHit::Search);
+        assert_eq!(tools[2].0, TopHit::Settings);
+
+        let settings_x = bar.tool_x(2);
+        assert_eq!(bar.hit(settings_x + 5.0, 1.0), Some(TopHit::Settings));
+        let tier1_x = bar.button_x(1);
+        assert_eq!(bar.hit(tier1_x + 5.0, 1.0), Some(TopHit::Tier(1)));
     }
 }
