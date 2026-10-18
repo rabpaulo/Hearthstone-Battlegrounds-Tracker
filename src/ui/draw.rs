@@ -209,6 +209,10 @@ impl Canvas {
         self.rrect(cx - r, cy - r, r * 2.0, r * 2.0, r, color);
     }
 
+    pub fn stroke_circle(&mut self, cx: f32, cy: f32, r: f32, width: f32, color: Rgba) {
+        self.stroke_rrect(cx - r, cy - r, r * 2.0, r * 2.0, r, width, color);
+    }
+
     /// Horizontal gradient over a rectangle.
     pub fn hgradient(&mut self, x: f32, y: f32, w: f32, h: f32, from: Rgba, to: Rgba) {
         let Some(rect) = SkRect::from_xywh(x, y, w, h) else { return };

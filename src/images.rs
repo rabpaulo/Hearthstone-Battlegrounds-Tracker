@@ -12,7 +12,20 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use tiny_skia::Pixmap;
 
+use crate::cards::Tribe;
 use crate::{net, paths};
+
+static ABERRATION_PNG: &[u8] = include_bytes!("../assets/tribes/aberration.png");
+static BEAST_PNG: &[u8] = include_bytes!("../assets/tribes/beast.png");
+static DEMON_PNG: &[u8] = include_bytes!("../assets/tribes/demon.png");
+static DRAGON_PNG: &[u8] = include_bytes!("../assets/tribes/dragon.png");
+static ELEMENTAL_PNG: &[u8] = include_bytes!("../assets/tribes/elemental.png");
+static MECH_PNG: &[u8] = include_bytes!("../assets/tribes/mech.png");
+static MURLOC_PNG: &[u8] = include_bytes!("../assets/tribes/murloc.png");
+static NAGA_PNG: &[u8] = include_bytes!("../assets/tribes/naga.png");
+static PIRATE_PNG: &[u8] = include_bytes!("../assets/tribes/pirate.png");
+static QUILBOAR_PNG: &[u8] = include_bytes!("../assets/tribes/quilboar.png");
+static UNDEAD_PNG: &[u8] = include_bytes!("../assets/tribes/undead.png");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImageKind {
@@ -94,6 +107,7 @@ pub struct Images {
     loaded: HashMap<Key, Arc<Pixmap>>,
     requested: HashSet<Key>,
     prefetched: HashSet<Key>,
+    tribe_icons: HashMap<Tribe, Arc<Pixmap>>,
     queue: Arc<Queue>,
     from_worker: Receiver<(Key, Option<Pixmap>)>,
     revision: u64,
@@ -124,10 +138,35 @@ impl Images {
             loaded: HashMap::new(),
             requested: HashSet::new(),
             prefetched: HashSet::new(),
+            tribe_icons: HashMap::new(),
             queue,
             from_worker,
             revision: 0,
         }
+    }
+
+    /// Tribe circle icon, embedded in the binary and cached in memory.
+    pub fn tribe_icon(&mut self, tribe: Tribe) -> Option<Arc<Pixmap>> {
+        if let Some(img) = self.tribe_icons.get(&tribe) {
+            return Some(img.clone());
+        }
+        let bytes = match tribe {
+            Tribe::Aberration => ABERRATION_PNG,
+            Tribe::Beast => BEAST_PNG,
+            Tribe::Demon => DEMON_PNG,
+            Tribe::Dragon => DRAGON_PNG,
+            Tribe::Elemental => ELEMENTAL_PNG,
+            Tribe::Mech => MECH_PNG,
+            Tribe::Murloc => MURLOC_PNG,
+            Tribe::Naga => NAGA_PNG,
+            Tribe::Pirate => PIRATE_PNG,
+            Tribe::Quilboar => QUILBOAR_PNG,
+            Tribe::Undead => UNDEAD_PNG,
+        };
+        let img = decode_png(bytes)?;
+        let arc = Arc::new(img);
+        self.tribe_icons.insert(tribe, arc.clone());
+        Some(arc)
     }
 
     /// The image if ready; otherwise schedules it and returns `None`.

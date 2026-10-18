@@ -57,6 +57,24 @@ impl Ctx<'_> {
         self.label_shadow_on(c, text, x, cy, px, w, color, shadow);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn label_shadow_align(
+        &mut self,
+        c: &mut Canvas,
+        text: &str,
+        x: f32,
+        cy: f32,
+        px: f32,
+        w: Weight,
+        color: Rgba,
+        align: Align,
+    ) {
+        let px = px * self.s;
+        let y = self.mid(cy, px, w);
+        let shadow = self.theme.shadow;
+        c.text_shadow(self.fonts, text, x, y, px, w, color, align, shadow);
+    }
+
     /// `label_shadow` with an explicit shadow: badges keep a dark one in
     /// every theme, because their fills are always bright.
     #[allow(clippy::too_many_arguments)]
@@ -1335,12 +1353,20 @@ impl SimPanel {
 // ---- lobby tribes and recent games ---------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct GameRow {
+    pub hero_card_id: String,
+    pub hero_name: String,
+    pub place: i32,
+    pub mmr_delta: Option<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct InfoPanel {
     pub tribes: Vec<Tribe>,
     pub slots: usize,
-    pub games: Vec<(String, i32)>,
-    /// Games this session and their average place.
-    pub session: Option<(usize, f32)>,
+    pub start_mmr: Option<i32>,
+    pub current_mmr: Option<i32>,
+    pub games: Vec<GameRow>,
     /// Unscaled width chosen by the layout.
     pub width: f32,
 }
@@ -1348,33 +1374,54 @@ pub struct InfoPanel {
 pub fn place_color(place: i32, theme: &Theme) -> Rgba {
     match place {
         1 => BADGE_GOLD,
-        2..=4 => {
-            if theme.bg == Theme::HIGH_CONTRAST.bg {
-                theme.win
-            } else {
-                Rgba(102, 187, 106, 255)
-            }
+        2..=4 => theme.win,
+        _ => theme.loss,
+    }
+}
+
+pub fn ordinal(place: i32) -> String {
+    match place {
+        1 => "1st".to_string(),
+        2 => "2nd".to_string(),
+        3 => "3rd".to_string(),
+        4 => "4th".to_string(),
+        5 => "5th".to_string(),
+        6 => "6th".to_string(),
+        7 => "7th".to_string(),
+        8 => "8th".to_string(),
+        n => format!("{n}th"),
+    }
+}
+
+pub fn format_thousands(n: i32) -> String {
+    let s = n.abs().to_string();
+    let mut out = String::new();
+    let len = s.len();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (len - i).is_multiple_of(3) {
+            out.push(',');
         }
-        _ => Rgba(120, 128, 150, 255),
+        out.push(ch);
+    }
+    if n < 0 {
+        format!("-{out}")
+    } else {
+        out
     }
 }
 
 impl InfoPanel {
-    const PAD: f32 = 8.0;
-    const TITLE: f32 = 20.0;
-    const CHIP: f32 = 21.0;
-    const GAME: f32 = 20.0;
+    pub const HEAD_H: f32 = 18.0;
+    pub const MINIONS_BODY_H: f32 = 56.0;
+    pub const MMR_BODY_H: f32 = 40.0;
+    pub const GAMES_COLS_H: f32 = 16.0;
+    pub const GAME_ROW_H: f32 = 24.0;
 
     fn height(&self) -> f32 {
-        let games = self.games.len().max(1) as f32;
-        Self::PAD
-            + Self::TITLE
-            + self.slots as f32 * (Self::CHIP + 3.0)
-            + 6.0
-            + Self::TITLE
-            + games * Self::GAME
-            + if self.session.is_some() { Self::GAME } else { 0.0 }
-            + Self::PAD
+        let games_count = self.games.len().max(1) as f32;
+        Self::HEAD_H + Self::MINIONS_BODY_H
+            + Self::HEAD_H + Self::MMR_BODY_H
+            + Self::HEAD_H + Self::GAMES_COLS_H + games_count * Self::GAME_ROW_H
     }
 
     pub fn size(&self, s: f32) -> (i32, i32) {
@@ -1385,46 +1432,130 @@ impl InfoPanel {
         let s = ctx.s;
         let t = ctx.theme;
         ctx.panel(c);
-        let x = Self::PAD * s;
-        let w = (self.width - 2.0 * Self::PAD) * s;
-        let mut y = Self::PAD * s;
-        ctx.label(c, "AVAILABLE TRIBES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, t.dim, Align::Left);
-        y += Self::TITLE * s;
-        for i in 0..self.slots {
-            let h = Self::CHIP * s;
+        let w = self.width * s;
+        let mut y = 0.0;
+
+        // Section header helper: dark background strip with centered bold text.
+        let render_header = |c: &mut Canvas, ctx: &mut Ctx, title: &str, top: f32| {
+            let h = Self::HEAD_H * s;
+            c.rect(0.0, top, w, h, t.header);
+            c.rect(0.0, top + h - 1.0 * s, w, 1.0 * s, t.border);
+            ctx.label_shadow_align(c, title, w / 2.0, top + h / 2.0, 11.0, Weight::Bold, t.text, Align::Center);
+        };
+
+        // 1. Available Minions
+        render_header(c, ctx, "Available Minions", y);
+        y += Self::HEAD_H * s;
+
+        let tribe_slots = self.slots.max(5);
+        let col_w = w / tribe_slots as f32;
+        let circle_r = 13.5 * s;
+        let circle_cy = y + 17.5 * s;
+
+        for i in 0..tribe_slots {
+            let cx = (i as f32 + 0.5) * col_w;
             match self.tribes.get(i) {
                 Some(&tribe) => {
-                    c.rrect(x, y, w, h, 4.0 * s, tribe_color(tribe));
-                    // Light text on the bright tribe fill, as on every badge.
-                    ctx.label_shadow_on(c, tribe.label(), x + 8.0 * s, y + h / 2.0, 12.0, Weight::Bold, t.on_accent, Rgba(0, 0, 0, 200));
+                    c.circle(cx, circle_cy, circle_r, Rgba(18, 22, 26, 255));
+                    if let Some(icon) = ctx.images.tribe_icon(tribe) {
+                        c.image_cover(&icon, cx - circle_r, circle_cy - circle_r, circle_r * 2.0, circle_r * 2.0, circle_r, 1.0);
+                    }
+                    c.stroke_circle(cx, circle_cy, circle_r, 1.5 * s, Rgba(46, 139, 87, 255));
+                    let label = tribe.label();
+                    let fit_label = ctx.fonts.fit(label, 9.5 * s, Weight::Bold, col_w - 2.0 * s);
+                    ctx.label_shadow_align(c, &fit_label, cx, circle_cy + circle_r + 8.5 * s, 9.5, Weight::Bold, t.text, Align::Center);
                 }
                 None => {
-                    c.rrect(x, y, w, h, 4.0 * s, t.button);
-                    ctx.label(c, "?", x + w / 2.0, y + h / 2.0, 12.0, Weight::Bold, t.dim, Align::Center);
+                    c.circle(cx, circle_cy, circle_r, t.button);
+                    c.stroke_circle(cx, circle_cy, circle_r, 1.0 * s, t.border);
+                    ctx.label(c, "?", cx, circle_cy, 12.0, Weight::Bold, t.dim, Align::Center);
                 }
             }
-            y += h + 3.0 * s;
         }
-        y += 6.0 * s;
-        ctx.label(c, "LATEST GAMES", x, y + Self::TITLE * s / 2.0, 10.0, Weight::Bold, t.dim, Align::Left);
-        y += Self::TITLE * s;
+        y += Self::MINIONS_BODY_H * s;
+
+        // 2. MMR
+        render_header(c, ctx, "MMR", y);
+        y += Self::HEAD_H * s;
+
+        // Vertical divider between Start and Current
+        c.rect(w * 0.5, y + 4.0 * s, 1.0 * s, (Self::MMR_BODY_H - 8.0) * s, t.border);
+
+        let sub_y = y + 10.0 * s;
+        let val_y = y + 26.5 * s;
+        let col1_x = w * 0.25;
+        let col2_x = w * 0.75;
+
+        ctx.label(c, "Start", col1_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
+        ctx.label(c, "Current", col2_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
+
+        let start_str = self.start_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
+        let current_str = self.current_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
+
+        ctx.label_shadow_align(c, &start_str, col1_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
+        ctx.label_shadow_align(c, &current_str, col2_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
+
+        y += Self::MMR_BODY_H * s;
+
+        // 3. Latest Games
+        render_header(c, ctx, "Latest Games", y);
+        y += Self::HEAD_H * s;
+
+        let ch_y = y + Self::GAMES_COLS_H * s / 2.0;
+        ctx.label(c, "Hero", 8.0 * s, ch_y, 10.5, Weight::Medium, t.dim, Align::Left);
+        let place_x = w * 0.62;
+        let mmr_x = w * 0.86;
+        ctx.label(c, "Place", place_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
+        ctx.label(c, "MMR", mmr_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
+
+        c.rect(0.0, y + Self::GAMES_COLS_H * s - 1.0 * s, w, 1.0 * s, t.border.alpha(120));
+        y += Self::GAMES_COLS_H * s;
+
         if self.games.is_empty() {
-            ctx.label(c, "No games yet", x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
-            y += Self::GAME * s;
-        }
-        for (hero, place) in &self.games {
-            let cy = y + Self::GAME * s / 2.0;
-            let r = 8.0 * s;
-            c.circle(x + r, cy, r, place_color(*place, &t));
-            ctx.label(c, &place.to_string(), x + r, cy, 10.5, Weight::Bold, Rgba(15, 18, 28, 255), Align::Center);
-            let name = ctx.fonts.fit(hero, 11.5 * s, Weight::Medium, w - 2.0 * r - 6.0 * s);
-            ctx.label(c, &name, x + 2.0 * r + 6.0 * s, cy, 11.5, Weight::Medium, t.text, Align::Left);
-            y += Self::GAME * s;
-        }
-        if let Some((n, avg)) = self.session {
-            let text = format!("Session: {n} · avg {avg:.1}");
-            let text = ctx.fonts.fit(&text, 11.0 * s, Weight::Medium, w);
-            ctx.label(c, &text, x, y + Self::GAME * s / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
+            let row_h = Self::GAME_ROW_H * s;
+            ctx.label(c, "No games yet", 8.0 * s, y + row_h / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
+        } else {
+            for game in &self.games {
+                let row_h = Self::GAME_ROW_H * s;
+                let mid_y = y + row_h / 2.0;
+
+                // Hero tile art on left with fade
+                if ctx.compact != CompactMode::Text {
+                    if let Some(img) = ctx.images.get(ImageKind::Tile, &game.hero_card_id) {
+                        let cap = match ctx.compact {
+                            CompactMode::Small => 0.25,
+                            _ => 0.46,
+                        };
+                        let tw = (row_h * img.width() as f32 / img.height() as f32).min(w * cap);
+                        c.image_cover(&img, 0.0, y, tw, row_h, 0.0, 1.0);
+                        c.hgradient(tw * 0.35, y, tw * 0.65, row_h, t.bg.alpha(0), t.bg);
+                    }
+                }
+
+                // Hero name
+                let name = ctx.fonts.fit(&game.hero_name, 11.0 * s, Weight::Bold, place_x - 14.0 * s);
+                ctx.label_shadow_align(c, &name, 8.0 * s, mid_y, 11.0, Weight::Bold, t.text, Align::Left);
+
+                // Placement (ordinal: 1st, 2nd, etc.)
+                let ord = ordinal(game.place);
+                let p_color = place_color(game.place, &t);
+                ctx.label_shadow_align(c, &ord, place_x, mid_y, 11.5, Weight::Bold, p_color, Align::Center);
+
+                // MMR Delta (+35, -44, or -)
+                let (delta_str, delta_color) = match game.mmr_delta {
+                    Some(d) => match d.cmp(&0) {
+                        std::cmp::Ordering::Greater => (format!("+{d}"), t.win),
+                        std::cmp::Ordering::Less => (d.to_string(), t.loss),
+                        std::cmp::Ordering::Equal => ("0".to_string(), t.dim),
+                    },
+                    None => ("-".to_string(), t.dim),
+                };
+                ctx.label_shadow_align(c, &delta_str, mmr_x, mid_y, 11.5, Weight::Bold, delta_color, Align::Center);
+
+                // Divider line below row
+                c.rect(0.0, y + row_h - 1.0 * s, w, 1.0 * s, t.border.alpha(70));
+                y += row_h;
+            }
         }
     }
 }
@@ -2134,9 +2265,57 @@ mod tests {
     #[test]
     fn place_colors_follow_theme() {
         assert_eq!(place_color(1, &Theme::DARK), BADGE_GOLD);
-        assert_eq!(place_color(2, &Theme::DARK), Rgba(102, 187, 106, 255));
+        assert_eq!(place_color(2, &Theme::DARK), Theme::DARK.win);
         assert_eq!(place_color(2, &Theme::HIGH_CONTRAST), Theme::HIGH_CONTRAST.win);
-        assert_eq!(place_color(8, &Theme::HIGH_CONTRAST), Rgba(120, 128, 150, 255));
+        assert_eq!(place_color(8, &Theme::HIGH_CONTRAST), Theme::HIGH_CONTRAST.loss);
+        assert_eq!(place_color(8, &Theme::DARK), Theme::DARK.loss);
+    }
+
+    #[test]
+    fn info_panel_formatting_and_size() {
+        assert_eq!(ordinal(1), "1st");
+        assert_eq!(ordinal(2), "2nd");
+        assert_eq!(ordinal(3), "3rd");
+        assert_eq!(ordinal(4), "4th");
+        assert_eq!(ordinal(8), "8th");
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1000), "1,000");
+        assert_eq!(format_thousands(13726), "13,726");
+        assert_eq!(format_thousands(-45), "-45");
+        assert_eq!(format_thousands(-1250), "-1,250");
+
+        let panel = InfoPanel {
+            tribes: vec![Tribe::Beast, Tribe::Mech],
+            slots: 5,
+            start_mmr: Some(13726),
+            current_mmr: Some(13717),
+            games: vec![
+                GameRow {
+                    hero_card_id: "TB_BaconShop_HERO_55".into(),
+                    hero_name: "Tickatus".into(),
+                    place: 5,
+                    mmr_delta: Some(-9),
+                },
+                GameRow {
+                    hero_card_id: "TB_BaconShop_HERO_53".into(),
+                    hero_name: "Mutanus".into(),
+                    place: 2,
+                    mmr_delta: Some(70),
+                },
+            ],
+            width: 190.0,
+        };
+        // Height: 18 + 56 + 18 + 40 + 18 + 16 + 2 * 24 = 214
+        assert_eq!(panel.size(1.0), (190, 214));
+
+        let (w, h) = panel.size(1.0);
+        let mut canvas = Canvas::new(w, h);
+        let mut fonts = Fonts::load();
+        let mut images = Images::new();
+        let mut ctx = Ctx { fonts: &mut fonts, images: &mut images, theme: Theme::DARK, compact: CompactMode::Full, s: 1.0, opaque: false };
+        panel.render(&mut canvas, &mut ctx);
+        canvas.pixmap.save_png("/tmp/test_info_panel.png").unwrap();
     }
 
     #[test]

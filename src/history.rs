@@ -20,6 +20,10 @@ pub struct GameRecord {
     pub ended_at: u64,
     #[serde(default)]
     pub tribes: Vec<String>,
+    #[serde(default)]
+    pub rating: Option<i32>,
+    #[serde(default)]
+    pub mmr_delta: Option<i32>,
 }
 
 pub struct History {
@@ -99,7 +103,16 @@ mod tests {
     use super::*;
 
     fn rec(id: &str, place: i32, at: u64) -> GameRecord {
-        GameRecord { id: id.into(), hero: "H".into(), place, turn: 10, ended_at: at, tribes: vec![] }
+        GameRecord {
+            id: id.into(),
+            hero: "H".into(),
+            place,
+            turn: 10,
+            ended_at: at,
+            tribes: vec![],
+            rating: None,
+            mmr_delta: None,
+        }
     }
 
     #[test]

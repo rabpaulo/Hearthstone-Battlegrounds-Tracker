@@ -40,6 +40,8 @@ pub struct Config {
     /// Read the lobby tribes from the game's memory (known from the hero
     /// pick on). Without it they are inferred from the shop.
     pub read_game_memory: bool,
+    /// Player Battlegrounds MMR if not read from memory.
+    pub mmr: Option<i32>,
     pub leaderboard: LeaderboardGeometry,
 }
 
@@ -120,6 +122,7 @@ impl Default for Config {
             show_search: true,
             hide_unavailable_tribes: true,
             read_game_memory: true,
+            mmr: None,
             leaderboard: LeaderboardGeometry::default(),
         }
     }

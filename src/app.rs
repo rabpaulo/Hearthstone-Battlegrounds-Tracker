@@ -18,7 +18,7 @@ use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts, Rgba};
 use crate::ui::panels::{
-    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, InfoPanel, MinionView, OddsView,
+    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, GameRow, InfoPanel, MinionView, OddsView,
     OpponentPopup, SearchHit, SearchPanel, SearchRow, SettingsHit, SettingsPanel, SimPanel, TierHit, TierList, TierRow,
     TierSection, TopBar, TopHit,
 };
@@ -241,7 +241,7 @@ impl Layout {
     /// leaderboard, within reason.
     pub fn info_width(&self) -> f32 {
         let room = (self.slot(0).x - self.hs.x) as f32 / self.s - 16.0;
-        room.clamp(120.0, 190.0)
+        room.clamp(180.0, 200.0)
     }
 
     pub fn info(&self, size: (i32, i32)) -> Rect {
@@ -325,6 +325,20 @@ fn keywords(e: &RawEntity) -> Vec<&'static str> {
         k.push("Stealth");
     }
     k
+}
+
+pub fn placement_delta(place: i32) -> i32 {
+    match place {
+        1 => 100,
+        2 => 70,
+        3 => 40,
+        4 => 10,
+        5 => -15,
+        6 => -45,
+        7 => -75,
+        8 => -100,
+        _ => 0,
+    }
 }
 
 impl Overlay {
@@ -422,6 +436,12 @@ impl Overlay {
                     if !catchup {
                         self.ended_game = self.lobby_memory.as_ref().map(|m| m.game);
                     }
+                    let delta = placement_delta(r.place);
+                    let prev_rating = self.cfg.mmr.or_else(|| self.history.latest(1).first().and_then(|g| g.rating));
+                    let new_rating = prev_rating.map(|rt| rt + delta);
+                    if let Some(nr) = new_rating {
+                        self.cfg.mmr = Some(nr);
+                    }
                     let record = GameRecord {
                         id: r.game_id,
                         hero: r.hero_card_id,
@@ -429,6 +449,8 @@ impl Overlay {
                         turn: r.turn,
                         ended_at: history::now_secs(),
                         tribes: self.tribes().iter().map(|t| t.label().to_string()).collect(),
+                        rating: new_rating,
+                        mmr_delta: Some(delta),
                     };
                     if self.history.add(record) {
                         log::info!("game finished: place {}", r.place);
@@ -787,20 +809,36 @@ impl Overlay {
         }
     }
 
-    pub fn info_panel(&self, width: f32) -> InfoPanel {
-        let games = self
-            .history
-            .latest(6)
+    pub fn info_panel(&mut self, width: f32) -> InfoPanel {
+        let latest = self.history.latest(5);
+        for g in &latest {
+            self.images.prefetch(ImageKind::Tile, &g.hero);
+        }
+        let games: Vec<GameRow> = latest
             .into_iter()
-            .map(|g| (self.db.name(&g.hero).to_string(), g.place))
+            .map(|g| GameRow {
+                hero_card_id: g.hero.clone(),
+                hero_name: self.db.name(&g.hero).to_string(),
+                place: g.place,
+                mmr_delta: g.mmr_delta.or_else(|| Some(placement_delta(g.place))),
+            })
             .collect();
+
         let session = self.history.session(history::now_secs());
+        let session_delta: i32 = session
+            .iter()
+            .map(|g| g.mmr_delta.unwrap_or_else(|| placement_delta(g.place)))
+            .sum();
+
+        let current_mmr = self.cfg.mmr.or_else(|| self.history.latest(1).first().and_then(|g| g.rating));
+        let start_mmr = current_mmr.map(|c| c - session_delta);
+
         InfoPanel {
             tribes: self.lobby_tribes().tribes,
             slots: Tribe::PER_LOBBY,
+            start_mmr,
+            current_mmr,
             games,
-            session: (!session.is_empty())
-                .then(|| (session.len(), session.iter().map(|g| g.place as f32).sum::<f32>() / session.len() as f32)),
             width,
         }
     }

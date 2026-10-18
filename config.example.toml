@@ -16,6 +16,10 @@ theme = "dark"
 # all, not even the hover preview). The settings button switches it live.
 compact_mode = "full"
 
+# Player Battlegrounds MMR (e.g. 8000) displayed in the left session panel.
+# Updated automatically across matches as game placement deltas are recorded.
+# mmr = 8000
+
 # Combat simulations per fight (more = steadier odds, slower).
 simulations = 8000
 
