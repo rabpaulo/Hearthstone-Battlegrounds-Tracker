@@ -5,6 +5,7 @@
 # hearthstone_dir = "/home/me/Games/battlenet/drive_c/Program Files (x86)/Hearthstone"
 
 # Extra UI scale (panels already scale with the game window height).
+# The settings panel shows it as "LAYOUT SIZE": 100% (default), 75% or 50%.
 scale = 1.0
 
 # Panel colour theme: "dark", "light" or "high-contrast". The settings button

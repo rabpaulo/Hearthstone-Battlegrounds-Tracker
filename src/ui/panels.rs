@@ -7,7 +7,7 @@
 use super::draw::{Align, Canvas, Fonts, Rgba, Weight};
 use super::theme::{Theme, ThemeName};
 use crate::cards::{Category, Tribe, KEYWORDS};
-use crate::config::CompactMode;
+use crate::config::{CompactMode, LayoutSize};
 use crate::images::{ImageKind, Images};
 
 pub fn tribe_color(t: Tribe) -> Rgba {
@@ -2002,14 +2002,18 @@ pub enum SettingsHit {
     Theme(usize),
     /// A compact mode row; index into `CompactMode::ALL`.
     Compact(usize),
+    /// A layout size row; index into `LayoutSize::ALL`.
+    Layout(usize),
 }
 
-/// In-overlay settings: the theme and the compact mode, applied and saved as
-/// soon as they are picked.
+/// In-overlay settings: the theme, the compact mode and the layout size,
+/// applied and saved as soon as they are picked.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SettingsPanel {
     pub theme: ThemeName,
     pub compact: CompactMode,
+    /// Current `scale` from the config, to mark the matching size row.
+    pub scale: f32,
     /// Where the choice is written, shown in the footer.
     pub config_path: String,
     /// The last save failed; shown instead of the path.
@@ -2034,6 +2038,8 @@ impl SettingsPanel {
             + ThemeName::ALL.len() as f32 * Self::ROW
             + Self::HEADING
             + CompactMode::ALL.len() as f32 * Self::ROW
+            + Self::HEADING
+            + LayoutSize::ALL.len() as f32 * Self::ROW
             + Self::FOOT
             + Self::PAD
     }
@@ -2054,6 +2060,14 @@ impl SettingsPanel {
         Self::compact_heading_top() + Self::HEADING
     }
 
+    fn layout_heading_top() -> f32 {
+        Self::compact_row_top() + CompactMode::ALL.len() as f32 * Self::ROW
+    }
+
+    fn layout_row_top() -> f32 {
+        Self::layout_heading_top() + Self::HEADING
+    }
+
     fn row_box(y0: f32, i: usize) -> Box2 {
         Box2 { x: Self::PAD + 2.0, y: y0 + i as f32 * Self::ROW, w: Self::W - 2.0 * Self::PAD - 4.0, h: Self::ROW }
     }
@@ -2068,6 +2082,11 @@ impl SettingsPanel {
                 (0..CompactMode::ALL.len())
                     .find(|&i| Self::row_box(Self::compact_row_top(), i).contains(ux, uy))
                     .map(SettingsHit::Compact)
+            })
+            .or_else(|| {
+                (0..LayoutSize::ALL.len())
+                    .find(|&i| Self::row_box(Self::layout_row_top(), i).contains(ux, uy))
+                    .map(SettingsHit::Layout)
             })
     }
 
@@ -2097,13 +2116,26 @@ impl SettingsPanel {
         for (i, mode) in CompactMode::ALL.iter().enumerate() {
             self.render_compact_row(c, ctx, i, *mode);
         }
+        ctx.label(
+            c,
+            "LAYOUT SIZE",
+            x + 6.0 * s,
+            (Self::layout_row_top() - Self::HEADING / 2.0) * s,
+            10.0,
+            Weight::Bold,
+            t.dim,
+            Align::Left,
+        );
+        for (i, size) in LayoutSize::ALL.iter().enumerate() {
+            self.render_layout_row(c, ctx, i, *size);
+        }
         // Footer: where the choice went, or why it did not.
         let (text, color) = match &self.save_error {
             Some(msg) => (format!("Not saved: {msg}"), t.loss),
             None => (format!("Saved to {}", self.config_path), t.dim),
         };
         let text = ctx.fonts.fit(&text, 10.0 * s, Weight::Medium, w);
-        let fy = (Self::compact_row_top() + CompactMode::ALL.len() as f32 * Self::ROW + Self::FOOT / 2.0) * s;
+        let fy = (Self::layout_row_top() + LayoutSize::ALL.len() as f32 * Self::ROW + Self::FOOT / 2.0) * s;
         ctx.label(c, &text, c.width() / 2.0, fy, 10.0, Weight::Medium, color, Align::Center);
     }
 
@@ -2166,6 +2198,32 @@ impl SettingsPanel {
         c.rrect(sx + 5.0 * s, sy + (sh - 4.0 * s) / 2.0, line_w, 4.0 * s, 2.0 * s, t.soft);
         let color = if selected || hover { t.text } else { t.soft };
         let label = ctx.fonts.fit(mode.label(), 12.5 * s, Weight::Bold, x + w - (sx + sw) - 12.0 * s);
+        ctx.label(c, &label, sx + sw + 8.0 * s, y + Self::ROW * s / 2.0, 12.5, Weight::Bold, color, Align::Left);
+    }
+
+    /// One layout size row: a miniature panel shrinking with the percentage,
+    /// its label, and an accent bar when it is the active one.
+    fn render_layout_row(&self, c: &mut Canvas, ctx: &mut Ctx, i: usize, size: LayoutSize) {
+        let s = ctx.s;
+        let t = ctx.theme;
+        let (x, y, w, _) = Self::row_box(Self::layout_row_top(), i).scaled(s);
+        let selected = self.scale == size.scale();
+        let hover = self.hover == Some(SettingsHit::Layout(i));
+        let fill = if hover { t.button_hover } else { t.button };
+        c.rrect(x, y + 1.0 * s, w, (Self::ROW - 2.0) * s, 5.0 * s, fill);
+        if selected {
+            c.rrect(x, y + 1.0 * s, 4.0 * s, (Self::ROW - 2.0) * s, 2.0 * s, t.accent);
+        }
+        // A miniature overlay: a panel taking its share of the swatch.
+        let (sx, sy) = (x + 10.0 * s, y + (Self::ROW - Self::SWATCH_H) / 2.0 * s);
+        let (sw, sh) = (Self::SWATCH_W * s, Self::SWATCH_H * s);
+        c.rrect(sx, sy, sw, sh, 4.0 * s, t.row);
+        c.stroke_rrect(sx, sy, sw, sh, 4.0 * s, 1.0, t.border);
+        let pct = size.scale();
+        let (pw, ph) = ((sw - 8.0 * s) * pct, (sh - 8.0 * s) * pct);
+        c.rrect(sx + (sw - pw) / 2.0, sy + (sh - ph) / 2.0, pw, ph, 2.0 * s, t.accent);
+        let color = if selected || hover { t.text } else { t.soft };
+        let label = ctx.fonts.fit(size.label(), 12.5 * s, Weight::Bold, x + w - (sx + sw) - 12.0 * s);
         ctx.label(c, &label, sx + sw + 8.0 * s, y + Self::ROW * s / 2.0, 12.5, Weight::Bold, color, Align::Left);
     }
 }
@@ -2242,6 +2300,7 @@ mod tests {
         SettingsPanel {
             theme: ThemeName::Dark,
             compact: CompactMode::Full,
+            scale: 1.0,
             config_path: "~/.config/hsbg-overlay/config.toml".into(),
             save_error: None,
             hover: None,
@@ -2249,17 +2308,19 @@ mod tests {
     }
 
     #[test]
-    fn settings_rows_pick_themes_and_compact_modes() {
+    fn settings_rows_pick_themes_compact_modes_and_layout_sizes() {
         let p = settings();
         let (x, y, w, h) = SettingsPanel::row_box(SettingsPanel::theme_row_top(), 1).scaled(2.0);
         assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Theme(1)));
         let (x, y, w, h) = SettingsPanel::row_box(SettingsPanel::compact_row_top(), 2).scaled(2.0);
         assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Compact(2)));
+        let (x, y, w, h) = SettingsPanel::row_box(SettingsPanel::layout_row_top(), 1).scaled(2.0);
+        assert_eq!(p.hit(x + w / 2.0, y + h / 2.0, 2.0), Some(SettingsHit::Layout(1)));
         assert_eq!(p.hit(4.0, 4.0, 2.0), None, "title band is not clickable");
-        // Both sections fit above the footer, which fits inside the panel.
-        assert_eq!(p.size(1.0, 1000), (252, 354));
-        let (_, y, _, h) = SettingsPanel::row_box(SettingsPanel::compact_row_top(), 2).scaled(1.0);
-        assert!(y + h < 354.0);
+        // All three sections fit above the footer, which fits inside the panel.
+        assert_eq!(p.size(1.0, 1000), (252, 494));
+        let (_, y, _, h) = SettingsPanel::row_box(SettingsPanel::layout_row_top(), 2).scaled(1.0);
+        assert!(y + h < 494.0);
     }
 
     #[test]

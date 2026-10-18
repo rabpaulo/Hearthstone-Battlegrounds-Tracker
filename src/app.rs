@@ -9,7 +9,7 @@ use x11rb::protocol::Event;
 
 use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe};
 use crate::comps::{CompGuide, Comps, CompsState};
-use crate::config::{self, CompactMode, Config, LeaderboardGeometry};
+use crate::config::{self, CompactMode, Config, LayoutSize, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
 use crate::history::{self, GameRecord, History};
 use crate::images::{ImageKind, Images};
@@ -797,12 +797,13 @@ impl Overlay {
         }
     }
 
-    /// The settings panel's model: the current theme and compact mode, and
-    /// where a pick is saved.
+    /// The settings panel's model: the current theme, compact mode and
+    /// layout size, and where a pick is saved.
     pub fn settings_panel(&self, config_path: &Path) -> SettingsPanel {
         SettingsPanel {
             theme: self.theme_name,
             compact: self.cfg.compact_mode,
+            scale: self.cfg.scale,
             config_path: short_home(config_path),
             save_error: self.ui.settings_error.clone(),
             hover: self.ui.settings_hover,
@@ -1288,6 +1289,22 @@ impl App {
         self.dirty = true;
     }
 
+    /// Applies a layout size picked in the settings panel, live, and writes
+    /// it to the config; a failure is shown in the panel instead.
+    fn pick_layout_size(&mut self, i: usize) {
+        let Some(size) = LayoutSize::ALL.get(i).copied() else { return };
+        if size.scale() != self.ov.cfg.scale {
+            self.ov.cfg.scale = size.scale();
+            self.panels.invalidate_all();
+        }
+        self.ov.ui.settings_error = None;
+        if let Err(e) = config::save_scale(&self.config_path, size) {
+            log::warn!("could not save the layout size: {e:#}");
+            self.ov.ui.settings_error = Some(e.to_string());
+        }
+        self.dirty = true;
+    }
+
     fn handle_x_events(&mut self) {
         let s = self.layout().map(|l| l.s).unwrap_or(1.0);
         while let Some(ev) = self.x.poll_event() {
@@ -1419,6 +1436,7 @@ impl App {
                     match hit {
                         Some(SettingsHit::Theme(i)) => self.pick_theme(i),
                         Some(SettingsHit::Compact(i)) => self.pick_compact_mode(i),
+                        Some(SettingsHit::Layout(i)) => self.pick_layout_size(i),
                         None => {}
                     }
                     self.ov.ui.settings_hover = hit;

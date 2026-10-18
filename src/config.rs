@@ -103,6 +103,39 @@ impl CompactMode {
     }
 }
 
+/// Layout sizes offered by the settings panel, as a percentage of the
+/// default: panels already scale to the game window height, this shrinks
+/// them further.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutSize {
+    P100,
+    P75,
+    P50,
+}
+
+impl LayoutSize {
+    /// Offered by the settings panel, in order.
+    pub const ALL: [LayoutSize; 3] = [LayoutSize::P100, LayoutSize::P75, LayoutSize::P50];
+
+    /// Name shown in the settings panel.
+    pub fn label(self) -> &'static str {
+        match self {
+            LayoutSize::P100 => "100%",
+            LayoutSize::P75 => "75%",
+            LayoutSize::P50 => "50%",
+        }
+    }
+
+    /// The `scale` written to and read from `config.toml`.
+    pub fn scale(self) -> f32 {
+        match self {
+            LayoutSize::P100 => 1.0,
+            LayoutSize::P75 => 0.75,
+            LayoutSize::P50 => 0.5,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -150,15 +183,26 @@ pub fn save_compact_mode(path: &Path, mode: CompactMode) -> Result<()> {
     save_key(path, "compact_mode", mode.config_name())
 }
 
+/// Writes the layout size picked in the settings panel as `scale`, keeping
+/// the rest of the file (comments, keys and sections).
+pub fn save_scale(path: &Path, size: LayoutSize) -> Result<()> {
+    save_line(path, &format!("scale = {:?}", size.scale()))
+}
+
 /// Rewrites one top-level key of the config file, preserving everything else.
 fn save_key(path: &Path, key: &str, value: &str) -> Result<()> {
+    save_line(path, &format!("{key} = \"{value}\""))
+}
+
+/// Rewrites one top-level key with its value written as given (not quoted).
+fn save_line(path: &Path, line: &str) -> Result<()> {
     let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let current = match std::fs::read_to_string(&target) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
     };
-    let updated = set_top_level_key(&current, key, value);
+    let updated = set_top_level_line(&current, line);
     if let Some(dir) = target.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -173,7 +217,13 @@ fn save_key(path: &Path, key: &str, value: &str) -> Result<()> {
 /// lines as they are. A missing key is inserted before the first `[section]`,
 /// or appended when the file has none.
 fn set_top_level_key(config: &str, key: &str, value: &str) -> String {
-    let line = format!("{key} = \"{value}\"");
+    set_top_level_line(config, &format!("{key} = \"{value}\""))
+}
+
+/// Sets a top-level line verbatim; its key (the part before `=`) is the one
+/// replaced.
+fn set_top_level_line(config: &str, line: &str) -> String {
+    let key = line.split_once('=').map(|(k, _)| k.trim()).unwrap_or("");
     let mut out = String::with_capacity(config.len() + line.len() + 1);
     let mut in_section = false;
     let mut done = false;
@@ -181,14 +231,14 @@ fn set_top_level_key(config: &str, key: &str, value: &str) -> String {
         let trimmed = l.trim();
         if !in_section && trimmed.starts_with('[') {
             if !done {
-                out.push_str(&line);
+                out.push_str(line);
                 out.push('\n');
                 done = true;
             }
             in_section = true;
         } else if !in_section && trimmed.split_once('=').is_some_and(|(k, _)| k.trim() == key) {
             if !done {
-                out.push_str(&line);
+                out.push_str(line);
                 out.push('\n');
                 done = true;
             }
@@ -198,7 +248,7 @@ fn set_top_level_key(config: &str, key: &str, value: &str) -> String {
         out.push('\n');
     }
     if !done {
-        out.push_str(&line);
+        out.push_str(line);
         out.push('\n');
     }
     out
@@ -320,6 +370,31 @@ mod tests {
         let fresh = dir.join("sub/new.toml");
         save_compact_mode(&fresh, CompactMode::Small).unwrap();
         assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "compact_mode = \"small\"\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn layout_sizes_map_to_the_scale_key() {
+        assert_eq!(LayoutSize::ALL.map(LayoutSize::label), ["100%", "75%", "50%"]);
+        assert_eq!(LayoutSize::ALL.map(LayoutSize::scale), [1.0, 0.75, 0.5]);
+        // Every size written by the panel is read back unchanged.
+        let dir = std::env::temp_dir().join(format!("hsbg-config-scale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# keep me\ntheme = \"dark\"\nscale = 1.0\n").unwrap();
+        for size in LayoutSize::ALL {
+            save_scale(&path, size).unwrap();
+            let c = Config::load(&path).unwrap();
+            assert_eq!(c.scale, size.scale());
+            assert_eq!(c.theme, ThemeName::Dark);
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# keep me\ntheme = \"dark\"\nscale = 0.5\n");
+        // A config that does not exist yet gets the key on its own.
+        let fresh = dir.join("sub/new.toml");
+        save_scale(&fresh, LayoutSize::P75).unwrap();
+        assert_eq!(std::fs::read_to_string(&fresh).unwrap(), "scale = 0.75\n");
+        assert_eq!(Config::load(&fresh).unwrap().scale, 0.75);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

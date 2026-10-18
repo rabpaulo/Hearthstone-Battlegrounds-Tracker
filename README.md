@@ -106,6 +106,8 @@ O botão com ícone de controles deslizantes na barra do topo abre o painel
   para ambientes bem iluminados) e **High contrast** (fundo preto puro, bordas
   e textos nítidos; usa azul para vitórias e laranja para derrotas, pensado para
   daltonismo).
+- **Layout size**: **100%** (o tamanho atual), **75%** ou **50%** — reduz os
+  painéis proporcionalmente, útil em monitores menores.
 - **Troca ao vivo**: ao clicar em uma opção de tema, todos os painéis abertos
   são repintados imediatamente com a nova paleta.
 - **Persistência automática**: a escolha é salva na hora em
