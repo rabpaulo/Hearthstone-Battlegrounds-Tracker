@@ -4,7 +4,9 @@
 #   ~/.local/share/hsbg-overlay/sidecar   (combat simulator, needs Node.js)
 #
 # Safe to rerun: it pulls new commits from the tracked branch first, and only
-# replaces what actually changed.
+# replaces what actually changed. A `cap_sys_ptrace` already set on the
+# installed binary (Wine + ptrace_scope=1, see README) is reapplied after it
+# is replaced.
 set -eu
 cd "$(dirname "$0")"
 
@@ -56,6 +58,16 @@ bin_dir="$HOME/.local/bin"
 bin="$bin_dir/hsbg-overlay"
 mkdir -p "$bin_dir"
 
+# Replacing the file drops any capability it had (README: Wine with
+# ptrace_scope=1 needs `setcap cap_sys_ptrace=eip` on the overlay), so note
+# whether the installed binary carries it and reapply it afterwards.
+ptrace_cap=0
+if [ -f "$bin" ] && command -v getcap >/dev/null 2>&1; then
+    case "$(getcap "$bin" 2>/dev/null || true)" in
+        *cap_sys_ptrace*) ptrace_cap=1 ;;
+    esac
+fi
+
 if cmp -s target/release/hsbg-overlay "$bin"; then
     echo "up to date: $bin"
     updated=0
@@ -63,6 +75,17 @@ else
     install -Dm755 target/release/hsbg-overlay "$bin"
     echo "installed: $bin ($(git rev-parse --short HEAD 2>/dev/null || echo local build))"
     updated=1
+fi
+
+if [ "$ptrace_cap" = 1 ] && [ "$updated" = 1 ]; then
+    if command -v setcap >/dev/null 2>&1 && setcap cap_sys_ptrace=eip "$bin" 2>/dev/null; then
+        echo "reapplied: cap_sys_ptrace on $bin"
+    elif command -v sudo >/dev/null 2>&1 && sudo -n setcap cap_sys_ptrace=eip "$bin" 2>/dev/null; then
+        echo "reapplied: cap_sys_ptrace on $bin (via sudo)"
+    else
+        echo "warning: the previous binary had cap_sys_ptrace and the new one does not; reapply it with:" >&2
+        echo "         sudo setcap cap_sys_ptrace=eip $bin" >&2
+    fi
 fi
 
 share="${XDG_DATA_HOME:-$HOME/.local/share}/hsbg-overlay/sidecar"

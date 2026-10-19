@@ -91,7 +91,8 @@ A leitura precisa de acesso tipo ptrace ao processo do jogo:
   contêiner do jogo roda num user namespace seu.
 - **Wine puro** com `kernel.yama.ptrace_scope=1` (padrão do Arch): dê a
   capacidade só ao overlay, `sudo setcap cap_sys_ptrace=eip ~/.local/bin/hsbg-overlay`
-  (refaça após reinstalar).
+  (o `install.sh` reaplica sozinho nas atualizações, se a capacidade já estava
+  no binário instalado).
 
 Sem acesso (ou com `read_game_memory = false`), as tribos são inferidas dos
 minions que o Bob oferece, completas em 2–4 turnos; até lá a lista mostra as
@@ -133,6 +134,8 @@ O script `./install.sh`:
 - Se for uma cópia clonada com upstream configurado e limpo, puxa novos commits automaticamente;
 - Compila o binário em modo release (`cargo build --release`);
 - Instala o executável em `~/.local/bin/hsbg-overlay` (apenas se houver mudanças);
+- Reaplica a capability `cap_sys_ptrace` quando o binário antigo já a tinha
+  (Wine puro); sem `setcap`/`sudo`, mostra o comando exato para refazer;
 - Copia e instala as dependências do simulador em `~/.local/share/hsbg-overlay/sidecar` (`npm ci`);
 - Garante a criação da pasta de configurações `~/.config/hsbg-overlay`;
 - Alerta caso `~/.local/bin` não esteja no seu `$PATH` ou se o overlay já estiver em execução.
