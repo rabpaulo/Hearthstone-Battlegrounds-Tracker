@@ -7,19 +7,19 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use x11rb::protocol::Event;
 
-use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe};
+use crate::cards::{Card, CardDb, Category, GroupKind, Kind, Tribe, KEYWORDS};
 use crate::comps::{CompGuide, Comps, CompsState};
 use crate::config::{self, CompactMode, Config, LayoutSize, LeaderboardGeometry};
 use crate::game::{tags, CombatSnapshot, Game, GameEvent, RawEntity};
-use crate::history::{self, GameRecord, History};
+use crate::history::{self, GameRecord, History, StoredBoard, StoredMinion};
 use crate::images::{ImageKind, Images};
 use crate::logfile::tail::LogTailer;
 use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts, Rgba};
 use crate::ui::panels::{
-    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, GameRow, InfoPanel, MinionView, OddsView,
-    OpponentPopup, SearchHit, SearchPanel, SearchRow, SettingsHit, SettingsPanel, SimPanel, TierHit, TierList, TierRow,
+    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, FinalBoardPopup, GameRow, InfoPanel, MinionView,
+    OddsView, OpponentPopup, SearchHit, SearchPanel, SearchRow, SettingsHit, SettingsPanel, SimPanel, TierHit, TierList, TierRow,
     TierSection, TopBar, TopHit,
 };
 use crate::ui::theme::{Theme, ThemeName};
@@ -58,6 +58,8 @@ pub struct UiState {
     pub slot_hover: Option<usize>,
     /// Turn chip of the opponent popup under the pointer.
     pub popup_hover: Option<usize>,
+    /// "Latest Games" row of the session panel under the pointer.
+    pub info_hover: Option<usize>,
     /// Turns per lobby id whose board is toggled away from the default
     /// (only the newest one shown).
     pub board_flips: HashMap<i32, HashSet<i32>>,
@@ -72,6 +74,10 @@ pub struct UiState {
     pub search_query: String,
     /// Card type the search is narrowed to.
     pub search_category: Option<Category>,
+    /// Keyword filter for the search (index into `KEYWORDS`).
+    pub search_keyword: Option<usize>,
+    /// Search keyword grid expanded.
+    pub search_filter_open: bool,
     /// Key presses go to the search field.
     pub search_focus: bool,
     pub search_scroll: f32,
@@ -249,6 +255,15 @@ impl Layout {
         Rect::new(self.hs.x + self.px(6.0), y, size.0, size.1)
     }
 
+    /// To the right of the session panel, level with the hovered game row,
+    /// kept inside the game window.
+    pub fn info_popup(&self, size: (i32, i32), info_rect: Rect, row_y: f32) -> Rect {
+        let x = (info_rect.x + info_rect.w + self.px(8.0)).clamp(self.hs.x, (self.hs.x + self.hs.w - size.0).max(self.hs.x));
+        let y = (info_rect.y as f32 + row_y - size.1 as f32 / 2.0).round() as i32;
+        let y = y.clamp(self.hs.y, (self.hs.y + self.hs.h - size.1).max(self.hs.y));
+        Rect::new(x, y, size.0, size.1)
+    }
+
     /// Tallest the opponent popup may be so it fits below the simulation panel.
     pub fn popup_max_h(&self, sim_rect: Rect) -> i32 {
         let y = sim_rect.y + sim_rect.h + self.px(6.0);
@@ -290,7 +305,7 @@ pub struct Overlay {
 }
 
 /// A query, the type it was narrowed to, and the ids it found.
-type SearchHits = (String, Option<Category>, Vec<String>);
+type SearchHits = (String, Option<Category>, Option<usize>, Vec<String>);
 
 /// The lobby's tribes as far as they are known.
 #[derive(Debug, Clone, PartialEq)]
@@ -419,6 +434,7 @@ impl Overlay {
                     self.ui.settings_open = false;
                     self.ui.settings_hover = None;
                     self.ui.board_flips.clear();
+                    self.ui.info_hover = None;
                     self.last_combat = None;
                     self.comps.refresh();
                 }
@@ -442,6 +458,8 @@ impl Overlay {
                     if let Some(nr) = new_rating {
                         self.cfg.mmr = Some(nr);
                     }
+                    // The board the player had going into their last combat.
+                    let board = self.last_combat.as_ref().map(|snap| self.stored_board(snap));
                     let record = GameRecord {
                         id: r.game_id,
                         hero: r.hero_card_id,
@@ -451,6 +469,7 @@ impl Overlay {
                         tribes: self.tribes().iter().map(|t| t.label().to_string()).collect(),
                         rating: new_rating,
                         mmr_delta: Some(delta),
+                        board,
                     };
                     if self.history.add(record) {
                         log::info!("game finished: place {}", r.place);
@@ -718,14 +737,19 @@ impl Overlay {
         }
         let query = self.ui.search_query.trim();
         let category = self.ui.search_category;
-        let browsing = query.is_empty() && category.is_none();
-        let hits = if browsing { Vec::new() } else { self.search(query, category) };
+        let keyword = self.ui.search_keyword;
+        let browsing = query.is_empty() && category.is_none() && keyword.is_none();
+        let hits = if browsing { Vec::new() } else { self.search(query, category, keyword) };
         let n = hits.len();
         let subtitle = if browsing {
             "Fuzzy search · Tab switches the card type".to_string()
         } else {
             match category {
                 Some(k) => k.count(n),
+                None if keyword.is_some() => {
+                    let label = KEYWORDS[keyword.unwrap()].label;
+                    format!("{n} card{} with {label}", if n == 1 { "" } else { "s" })
+                }
                 None => format!("{n} card{}", if n == 1 { "" } else { "s" }),
             }
         };
@@ -733,6 +757,8 @@ impl Overlay {
             query: self.ui.search_query.clone(),
             focused: self.ui.search_focus,
             category,
+            keyword: self.ui.search_keyword,
+            filter_open: self.ui.search_filter_open,
             rows: hits.iter().take(SEARCH_ROWS).map(|c| search_row(c, &self.theme)).collect(),
             more: n.saturating_sub(SEARCH_ROWS),
             note: if browsing { "Type a name, or pick a card type".into() } else { "No cards match".into() },
@@ -743,14 +769,20 @@ impl Overlay {
         })
     }
 
-    fn search(&self, query: &str, category: Option<Category>) -> Vec<&Card> {
+    fn search(&self, query: &str, category: Option<Category>, keyword: Option<usize>) -> Vec<&Card> {
         let mut cache = self.search_cache.borrow_mut();
-        let fresh = cache.as_ref().is_some_and(|(q, k, _)| q == query && *k == category);
+        let fresh = cache.as_ref().is_some_and(|(q, k, w, _)| q == query && *k == category && *w == keyword);
         if !fresh {
-            let ids = self.db.search(query, category).iter().map(|c| c.id.clone()).collect();
-            *cache = Some((query.to_string(), category, ids));
+            let ids = self
+                .db
+                .search(query, category)
+                .iter()
+                .filter(|c| keyword.is_none_or(|w| c.has_keyword(w)))
+                .map(|c| c.id.clone())
+                .collect();
+            *cache = Some((query.to_string(), category, keyword, ids));
         }
-        cache.as_ref().map(|(_, _, ids)| ids.iter().filter_map(|id| self.db.get(id)).collect()).unwrap_or_default()
+        cache.as_ref().map(|(_, _, _, ids)| ids.iter().filter_map(|id| self.db.get(id)).collect()).unwrap_or_default()
     }
 
     /// Hover preview of a card; none in text mode, which shows no art.
@@ -809,6 +841,28 @@ impl Overlay {
         }
     }
 
+    /// A finished player's side frozen for the history: minions with stats
+    /// and keywords, plus the turn and tavern tier they fought at.
+    fn stored_board(&self, snap: &CombatSnapshot) -> StoredBoard {
+        StoredBoard {
+            turn: snap.turn,
+            tier: snap.player.tavern_tier(),
+            minions: snap
+                .player
+                .board
+                .iter()
+                .map(|m| StoredMinion {
+                    card_id: m.card_id.clone(),
+                    name: self.db.name(&m.card_id).to_string(),
+                    attack: m.tag(tags::ATK),
+                    health: m.tag(tags::HEALTH) - m.tag(tags::DAMAGE),
+                    golden: m.tag(tags::PREMIUM) == 1 || m.card_id.ends_with("_G"),
+                    keywords: keywords(m).into_iter().map(Into::into).collect(),
+                })
+                .collect(),
+        }
+    }
+
     pub fn info_panel(&mut self, width: f32) -> InfoPanel {
         let latest = self.history.latest(5);
         let mut games = Vec::with_capacity(latest.len());
@@ -821,6 +875,10 @@ impl Overlay {
                 place: g.place,
                 mmr_delta: g.mmr_delta.or_else(|| Some(placement_delta(g.place))),
             });
+        }
+        // Games rarely leave the list, but a stale hover then sticks.
+        if self.ui.info_hover.is_some_and(|i| i >= games.len()) {
+            self.ui.info_hover = None;
         }
 
         let session = self.history.session(history::now_secs());
@@ -838,8 +896,46 @@ impl Overlay {
             start_mmr,
             current_mmr,
             games,
+            hover: self.ui.info_hover,
             width,
         }
+    }
+
+    /// The final-board popup of the hovered "Latest Games" row; old records
+    /// from before boards were stored show a note instead.
+    pub fn final_board_popup(&mut self, row: Option<usize>) -> Option<FinalBoardPopup> {
+        let g = self.history.latest(5).into_iter().nth(row?)?;
+        let board = g.board.as_ref().map(|stored| BoardView {
+            turn: stored.turn,
+            tier: stored.tier,
+            minions: stored
+                .minions
+                .iter()
+                .map(|m| MinionView {
+                    card_id: m.card_id.clone(),
+                    name: m.name.clone(),
+                    attack: m.attack,
+                    health: m.health,
+                    golden: m.golden,
+                    keywords: m.keywords.clone(),
+                })
+                .collect(),
+        });
+        let hero = self.db.base_hero(&g.hero);
+        self.images.prefetch(ImageKind::Tile, hero);
+        if let Some(b) = &board {
+            for m in &b.minions {
+                self.images.prefetch(ImageKind::Portrait, &m.card_id);
+            }
+        }
+        Some(FinalBoardPopup {
+            hero_name: self.db.name(hero).to_string(),
+            hero_card_id: hero.to_string(),
+            place: g.place,
+            board,
+            images_rev: self.images.revision(),
+            compact: self.cfg.compact_mode,
+        })
     }
 
     pub fn popup(&self, slot: usize) -> Option<OpponentPopup> {
@@ -867,7 +963,7 @@ impl Overlay {
                         attack: m.tag(tags::ATK),
                         health: m.tag(tags::HEALTH) - m.tag(tags::DAMAGE),
                         golden: m.tag(tags::PREMIUM) == 1 || m.card_id.ends_with("_G"),
-                        keywords: keywords(m),
+                        keywords: keywords(m).into_iter().map(Into::into).collect(),
                     })
                     .collect(),
             })
@@ -994,11 +1090,13 @@ struct Panels {
     settings: Panel<SettingsPanel>,
     preview: Panel<CardPreview>,
     popup: Panel<OpponentPopup>,
+    /// Final board of a hovered game in the session panel.
+    board: Panel<FinalBoardPopup>,
     calib: Panel<Calibration>,
 }
 
 impl Panels {
-    fn windows(&self) -> [&OverlayWindow; 10] {
+    fn windows(&self) -> [&OverlayWindow; 11] {
         [
             &self.info.win,
             &self.sim.win,
@@ -1010,6 +1108,7 @@ impl Panels {
             &self.calib.win,
             &self.preview.win,
             &self.popup.win,
+            &self.board.win,
         ]
     }
 
@@ -1023,6 +1122,7 @@ impl Panels {
         self.settings.hide(x);
         self.preview.hide(x);
         self.popup.hide(x);
+        self.board.hide(x);
         self.calib.hide(x);
     }
 
@@ -1037,6 +1137,7 @@ impl Panels {
         self.settings.invalidate();
         self.preview.invalidate();
         self.popup.invalidate();
+        self.board.invalidate();
         self.calib.invalidate();
     }
 }
@@ -1079,7 +1180,8 @@ impl App {
         log::info!("compositor {}", if x.compositing { "detected: translucent panels" } else { "not detected: opaque panels" });
         x.watch_root()?;
         let panels = Panels {
-            info: Panel::new(&x, "hsbg-info", false)?,
+            // Interactive so hovering a "Latest Games" row can be noticed.
+            info: Panel::new(&x, "hsbg-info", true)?,
             sim: Panel::new(&x, "hsbg-odds", false)?,
             top: Panel::new(&x, "hsbg-tiers-bar", true)?,
             tiers: Panel::new(&x, "hsbg-tiers", true)?,
@@ -1088,6 +1190,7 @@ impl App {
             settings: Panel::new(&x, "hsbg-settings", true)?,
             preview: Panel::new(&x, "hsbg-preview", false)?,
             popup: Panel::new(&x, "hsbg-opponent", true)?,
+            board: Panel::new(&x, "hsbg-board", false)?,
             calib: Panel::new(&x, "hsbg-calibration", false)?,
         };
         let lobby_reader = ov.cfg.read_game_memory.then(crate::memory::spawn_reader);
@@ -1422,6 +1525,18 @@ impl App {
                             ui.search_scroll = 0.0;
                             ui.search_hover = None;
                         }
+                        Some(SearchHit::KeywordBar) => ui.search_filter_open = !ui.search_filter_open,
+                        Some(SearchHit::KeywordClear) => {
+                            ui.search_keyword = None;
+                            ui.search_scroll = 0.0;
+                            ui.search_hover = None;
+                        }
+                        Some(SearchHit::Keyword(k)) => {
+                            ui.search_keyword = k;
+                            ui.search_filter_open = false;
+                            ui.search_scroll = 0.0;
+                            ui.search_hover = None;
+                        }
                         Some(SearchHit::Row(_)) | None => {}
                     }
                 }
@@ -1471,6 +1586,10 @@ impl App {
                     self.ov.ui.popup_hover = self.panels.popup.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
                 }
                 Event::LeaveNotify(e) if e.event == self.panels.popup.win.id => self.ov.ui.popup_hover = None,
+                Event::MotionNotify(e) if e.event == self.panels.info.win.id => {
+                    self.ov.ui.info_hover = self.panels.info.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                }
+                Event::LeaveNotify(e) if e.event == self.panels.info.win.id => self.ov.ui.info_hover = None,
                 Event::ButtonPress(e) if e.event == self.panels.tiers.win.id && (e.detail == 4 || e.detail == 5) => {
                     let step = 27.0 * 3.0 * s * if e.detail == 4 { -1.0 } else { 1.0 };
                     if let Some(m) = self.panels.tiers.model() {
@@ -1625,6 +1744,7 @@ impl App {
         let cfg = self.ov.cfg.clone();
 
         let info = self.ov.info_panel(layout.info_width());
+        let board_popup = self.ov.final_board_popup(info.hover);
         let sim = self.ov.sim_panel();
         let top = self.ov.top_bar();
         let tiers = self.ov.tier_list();
@@ -1672,10 +1792,23 @@ impl App {
         let p = &mut self.panels;
 
         if in_game && cfg.show_session {
-            let rect = layout.info(info.size(s));
-            p.info.update(x, rect, &info, &mut ctx, |m, c, ctx| m.render(c, ctx));
+            let info_rect = layout.info(info.size(s));
+            p.info.update(x, info_rect, &info, &mut ctx, |m, c, ctx| m.render(c, ctx));
+            // The final board of the hovered game, level with its row.
+            match &board_popup {
+                Some(bp) => {
+                    let row = info.row_center(info.hover.unwrap_or(0), s);
+                    if let Some(cy) = row {
+                        let brect = layout.info_popup(bp.size(s), info_rect, cy);
+                        p.board.update(x, brect, bp, &mut ctx, |m, c, ctx| m.render(c, ctx));
+                    }
+                }
+                _ => p.board.hide(x),
+            }
         } else {
             p.info.hide(x);
+            p.board.hide(x);
+            self.ov.ui.info_hover = None;
         }
         let top_rect = layout.top_bar(top.size(s));
         // The settings button lives in the bar, so it shows whenever a game does.
@@ -1836,6 +1969,11 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     let hs = Rect::new(0, 0, 1920, 1080);
     let layout = Layout::new(hs, &ov.cfg);
     let s = layout.s;
+    // The final board of the latest game, hovered over in the session panel
+    // (only when the replay went all the way to a finished game).
+    if !ov.history.latest(5).is_empty() {
+        ov.ui.info_hover = Some(0);
+    }
     // Text mode draws no card art, so there is nothing to download.
     let art = ov.cfg.compact_mode != CompactMode::Text;
     // Let image downloads finish.
@@ -1859,6 +1997,12 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
             if let Some(p) = &popup {
                 ids.push((ImageKind::Tile, p.hero_card_id.clone()));
                 ids.extend(p.boards.iter().flat_map(|b| &b.minions).map(|m| (ImageKind::Portrait, m.card_id.clone())));
+            }
+            // Final boards recorded while replaying, for the session panel.
+            for g in ov.history.latest(5) {
+                if let Some(b) = &g.board {
+                    ids.extend(b.minions.iter().map(|m| (ImageKind::Portrait, m.card_id.clone())));
+                }
             }
         }
         for (kind, id) in &ids {
@@ -1884,6 +2028,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         screen.stroke_rrect(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 6.0, 2.0, crate::ui::draw::Rgba(255, 255, 255, 120));
     }
     let info = ov.info_panel(layout.info_width());
+    let board_popup = ov.final_board_popup(ov.ui.info_hover);
     let sim = ov.sim_panel();
     let top = ov.top_bar();
     let list = ov.tier_list();
@@ -1930,6 +2075,14 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     ov.ui.search_hover = None;
     ov.ui.search_category = Some(Category::Hero);
     search_panels.extend(ov.search_panel().map(|p| ("search-heroes", p)));
+    // The keyword filter: applied, and with its grid open.
+    ov.ui.search_category = None;
+    ov.ui.search_keyword = crate::cards::KEYWORDS.iter().position(|k| k.label == "Deathrattle");
+    search_panels.extend(ov.search_panel().map(|p| ("search-deathrattle", p)));
+    ov.ui.search_keyword = None;
+    ov.ui.search_filter_open = true;
+    search_panels.extend(ov.search_panel().map(|p| ("search-keyword", p)));
+    ov.ui.search_filter_open = false;
     ov.ui.search_open = false;
     // Settings: the compact mode list, second row under the pointer.
     ov.ui.settings_open = true;
@@ -1977,6 +2130,10 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     emit(&mut scratch, &mut ctx, out, "settings", Rect::new(0, 0, w, h), &|c, ctx| settings.render(c, ctx))?;
     let sc = &mut screen;
     emit(sc, &mut ctx, out, "info", layout.info(info.size(s)), &|c, ctx| info.render(c, ctx))?;
+    if let (Some(bp), Some(cy)) = (&board_popup, info.row_center(0, s)) {
+        let brect = layout.info_popup(bp.size(s), layout.info(info.size(s)), cy);
+        emit(sc, &mut ctx, out, "final-board", brect, &|c, ctx| bp.render(c, ctx))?;
+    }
     let top_rect = layout.top_bar(top.size(s));
     let sim_rect = layout.sim(sim.size(s), Some(top_rect));
     emit(sc, &mut ctx, out, "sim", sim_rect, &|c, ctx| sim.render(c, ctx))?;
@@ -2111,10 +2268,66 @@ mod tests {
             tribes: vec![],
             rating: None,
             mmr_delta: Some(10),
+            board: None,
         }]);
         let panel = ov.info_panel(200.0);
         assert_eq!(panel.games[0].hero_card_id, "H1");
         assert_eq!(panel.games[0].hero_name, "Yogg-Saron, Hope's End");
+        // Old records hover to a note instead of a board.
+        assert!(ov.final_board_popup(Some(0)).unwrap().board.is_none());
+        assert!(ov.final_board_popup(Some(1)).is_none(), "no row behind the one game");
+    }
+
+    #[test]
+    fn final_board_stored_with_the_game_record() {
+        let mut ov = overlay();
+        for l in [
+            // Our own board, one minion going into the last combat.
+            "FULL_ENTITY - Creating ID=30 CardID=B1",
+            "    tag=CONTROLLER value=8",
+            "    tag=CARDTYPE value=MINION",
+            "    tag=ZONE value=PLAY",
+            "    tag=ZONE_POSITION value=1",
+            "    tag=ATK value=2",
+            "    tag=HEALTH value=1",
+            // Combat setup against the dummy's own board.
+            "    TAG_CHANGE Entity=GameEntity tag=TURN value=2 ",
+            "    TAG_CHANGE Entity=[entityName=x id=20 zone=PLAY zonePos=1 cardId=D1 player=16] tag=ZONE value=REMOVEDFROMGAME ",
+            "BLOCK_START BlockType=TRIGGER Entity=GameEntity EffectCardId=x EffectIndex=-1 Target=0 SubOption=-1 TriggerKeyword=TAG_NOT_SET",
+            "    TAG_CHANGE Entity=Me#1 tag=BACON_CURRENT_COMBAT_PLAYER_ID value=3 ",
+            "    TAG_CHANGE Entity=Someone tag=BACON_CURRENT_COMBAT_PLAYER_ID value=5 ",
+            "    FULL_ENTITY - Updating [entityName=H id=40 zone=PLAY zonePos=0 cardId=D1 player=16] CardID=D1",
+            "        tag=CONTROLLER value=16",
+            "        tag=CARDTYPE value=HERO",
+            "        tag=ZONE value=PLAY",
+            "    TAG_CHANGE Entity=Someone tag=HERO_ENTITY value=40 ",
+            "    FULL_ENTITY - Updating [entityName=M id=41 zone=PLAY zonePos=1 cardId=D1 player=16] CardID=D1",
+            "        tag=CONTROLLER value=16",
+            "        tag=CARDTYPE value=MINION",
+            "        tag=ZONE value=PLAY",
+            "        tag=ZONE_POSITION value=1",
+            "BLOCK_END",
+            "    TAG_CHANGE Entity=GameEntity tag=STEP value=FINAL_GAMEOVER ",
+        ] {
+            let l = if l.starts_with("D ") { l.to_string() } else { format!("{P}{l}") };
+            ov.game.process(&l);
+            let events = ov.game.take_events();
+            if !events.is_empty() {
+                ov.handle_events(events, false);
+            }
+        }
+        let record = ov.history.latest(1).into_iter().next().unwrap().clone();
+        let board = record.board.expect("the last combat's board is stored");
+        assert_eq!((board.turn, board.minions.len()), (1, 1));
+        let m = &board.minions[0];
+        assert_eq!((m.card_id.as_str(), m.attack, m.health), ("B1", 2, 1));
+        assert_eq!(m.name, "Bat");
+
+        // The hovered row shows the board again.
+        let popup = ov.final_board_popup(Some(0)).unwrap();
+        let b = popup.board.unwrap();
+        assert_eq!((b.turn, b.minions.len()), (1, 1));
+        assert_eq!(b.minions[0].name, "Bat");
     }
 
     #[test]
@@ -2252,6 +2465,35 @@ mod tests {
     }
 
     #[test]
+    fn search_keyword_filters_cards() {
+        let cards = r#"[
+            {"id":"B1","name":"Bat","type":"Minion","races":["BEAST"],"techLevel":1,"isBaconPool":true,"mechanics":["DEATHRATTLE"]},
+            {"id":"B2","name":"Boar","type":"Minion","races":["BEAST"],"techLevel":1,"isBaconPool":true},
+            {"id":"S1","name":"Coin","type":"Battleground_spell","techLevel":1,"isBaconPool":true}
+        ]"#;
+        let mut ov = overlay();
+        ov.db = CardDb::parse(cards.as_bytes(), Path::new("test")).unwrap();
+        ov.ui.search_open = true;
+        ov.ui.search_keyword = crate::cards::KEYWORDS.iter().position(|k| k.label == "Deathrattle");
+        let panel = ov.search_panel().unwrap();
+        let names: Vec<_> = panel.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Bat"], "an empty query lists the cards with the keyword");
+        assert!(panel.subtitle.contains("1 card with Deathrattle"));
+        // A name query is narrowed by the keyword too.
+        ov.ui.search_query = "boar".into();
+        let panel = ov.search_panel().unwrap();
+        assert!(panel.rows.is_empty());
+        assert_eq!(panel.note, "No cards match");
+        ov.ui.search_query = "ba".into();
+        let panel = ov.search_panel().unwrap();
+        let names: Vec<_> = panel.rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Bat"]);
+        // Clearing the keyword lists every match again.
+        ov.ui.search_keyword = None;
+        assert_eq!(ov.search_panel().unwrap().rows.len(), 2);
+    }
+
+    #[test]
     fn search_panel_hit_testing() {
         let mut ov = overlay();
         ov.ui.search_open = true;
@@ -2263,6 +2505,16 @@ mod tests {
         // Chip grid: "All" first, then the types in order.
         assert_eq!(panel.hit(20.0, 88.0, 1.0), Some(SearchHit::Category(None)));
         assert_eq!(panel.hit(100.0, 88.0, 1.0), Some(SearchHit::Category(Some(Category::Minion))));
+        // Keyword bar under the type chips, its "×" on the right end.
+        assert_eq!(panel.hit(100.0, 142.0, 1.0), Some(SearchHit::KeywordBar));
+        ov.ui.search_keyword = Some(0);
+        assert_eq!(ov.search_panel().unwrap().hit(260.0, 142.0, 1.0), Some(SearchHit::KeywordClear));
+        ov.ui.search_keyword = None;
+        // With the grid open: "Any" first, then the keywords.
+        ov.ui.search_filter_open = true;
+        let open = ov.search_panel().unwrap();
+        assert_eq!(open.hit(20.0, 173.0, 1.0), Some(SearchHit::Keyword(None)));
+        assert_eq!(open.hit(110.0, 173.0, 1.0), Some(SearchHit::Keyword(Some(0))));
     }
 
     #[test]

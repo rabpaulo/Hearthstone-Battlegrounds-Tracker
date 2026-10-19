@@ -12,9 +12,9 @@ só para as tribos da lobby, um campo da memória do cliente.
 | Turno + tiers | topo, direita | Turno atual, botão de ajustes e botões de tier 1–6/7 (o tier da sua taverna tem borda dourada) |
 | Ajustes | botão de sliders no topo | Tema dos painéis: escuro, claro ou alto contraste. E o modo compacto: arte cheia, miniaturas menores ou só texto. Troca na hora e grava a escolha no config |
 | Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
-| Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
+| Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta e por palavra-chave; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
-| Painel da sessão (HDT) | esquerda | **Available Minions** (ícones circulares das 5 tribos da lobby com anel verde), **MMR** (Start / Current) e **Latest Games** (arte do herói com fade à esquerda, colocação ordinal 1st/2nd/etc. e delta de MMR; o herói aparece sem a skin usada — "Soggy Yoggy" vira Yogg-Saron) |
+| Painel da sessão (HDT) | esquerda | **Available Minions** (ícones circulares das 5 tribos da lobby com anel verde), **MMR** (Start / Current) e **Latest Games** (arte do herói com fade à esquerda, colocação ordinal 1st/2nd/etc. e delta de MMR; o herói aparece sem a skin usada — "Soggy Yoggy" vira Yogg-Saron). Hover numa linha do histórico abre, ao lado, o **tabuleiro final** daquele jogo: os lacaios como no jogo (ataque, vida, dourado, taunt/escudo/reborn…), com o turno e o tier em que lutaram — gravado junto com o histórico em `games.json` |
 | Tabuleiro do oponente | topo, centro (ao passar o mouse no leaderboard) | Um botão por turno em que você enfrentou o jogador; clique para mostrar ou esconder o tabuleiro daquele turno (o mais recente vem ligado), logo abaixo das chances de combate. Cada tabuleiro aparece na horizontal como no jogo: retrato do lacaio com ataque embaixo à esquerda e vida embaixo à direita, taunt, escudo divino, dourado e outras palavras-chave marcados, além do tier e de há quantos turnos; o popup continua aberto com o mouse sobre ele |
 
 Não incluído: estatísticas exclusivas do HSReplay Premium (estatísticas pagas de heróis no meta).
@@ -56,6 +56,11 @@ digita.
 
 - **Tipo**: All, Minion, Spell, Hero, Trinket, Anomaly ou Reward. Com um tipo
   escolhido e o campo vazio, a lista mostra todas as cartas desse tipo.
+- **Keyword**: filtro por palavra-chave (Battlecry, Deathrattle, Taunt…) no
+  bar abaixo dos tipos, como no tier browser — abre a grade de palavras-chave,
+  "Any" limpa; com a palavra aplicada e o campo vazio, a lista mostra as cartas
+  que têm a palavra-chave (direta ou via texto). As duas combinações de filtro
+  valem para o resultado da busca também.
 - Teclado: **↑/↓** e **PgUp/PgDn** escolhem o resultado, **Tab** /
   **Shift+Tab** trocam o tipo, **Ctrl+W** / **Ctrl+Backspace** apagam uma
   palavra, **Ctrl+U** limpa, **Enter** devolve o teclado ao jogo (o painel

@@ -989,6 +989,12 @@ pub enum SearchHit {
     Clear,
     /// A type chip; `None` is "All".
     Category(Option<Category>),
+    /// The keyword filter bar (opens/closes the keyword grid).
+    KeywordBar,
+    /// The "×" that clears the keyword filter.
+    KeywordClear,
+    /// A keyword chip; `None` is "Any".
+    Keyword(Option<usize>),
     Row(usize),
 }
 
@@ -999,6 +1005,10 @@ pub struct SearchPanel {
     /// Typing goes to the field (the keyboard is grabbed).
     pub focused: bool,
     pub category: Option<Category>,
+    /// Active keyword filter, an index into `KEYWORDS`.
+    pub keyword: Option<usize>,
+    /// Keyword grid expanded.
+    pub filter_open: bool,
     pub rows: Vec<SearchRow>,
     /// Matches left out of `rows`.
     pub more: usize,
@@ -1016,6 +1026,8 @@ impl SearchPanel {
     const FIELD: f32 = 36.0;
     const CHIP_H: f32 = 22.0;
     const CHIP_COLS: usize = 4;
+    const KW_BAR: f32 = 30.0;
+    const KW_COLS: usize = 3;
     const GAP: f32 = 4.0;
     const ROW: f32 = 36.0;
     const FOOT: f32 = 26.0;
@@ -1026,9 +1038,45 @@ impl SearchPanel {
         std::iter::once(None).chain(Category::ALL.into_iter().map(Some))
     }
 
-    fn header_h() -> f32 {
+    fn chips_h() -> f32 {
         let rows = (Category::ALL.len() + 1).div_ceil(Self::CHIP_COLS) as f32;
-        Self::TITLE + Self::FIELD + rows * (Self::CHIP_H + Self::GAP) + Self::GAP
+        rows * (Self::CHIP_H + Self::GAP)
+    }
+
+    /// Height of the fixed header (title, field, type chips, keyword bar
+    /// and, when open, the keyword grid).
+    fn header_h(&self) -> f32 {
+        Self::TITLE + Self::FIELD + Self::chips_h() + Self::KW_BAR + self.kw_grid_h()
+    }
+
+    /// Height of the expanded keyword grid.
+    fn kw_grid_h(&self) -> f32 {
+        if !self.filter_open {
+            return 0.0;
+        }
+        let rows = (KEYWORDS.len() + 1).div_ceil(Self::KW_COLS) as f32;
+        rows * (Self::CHIP_H + Self::GAP) + Self::GAP
+    }
+
+    /// Top of the keyword filter section, right after the type chips.
+    fn kw_top() -> f32 {
+        Self::TITLE + Self::FIELD + Self::chips_h()
+    }
+
+    fn kw_bar_box() -> Box2 {
+        Box2 { x: Self::PAD + 2.0, y: Self::kw_top() + 3.0, w: Self::W - 2.0 * Self::PAD - 4.0, h: Self::KW_BAR - 6.0 }
+    }
+
+    fn kw_chip_box(i: usize) -> Box2 {
+        let inner = Self::W - 2.0 * Self::PAD - 4.0;
+        let cw = (inner - Self::GAP * (Self::KW_COLS - 1) as f32) / Self::KW_COLS as f32;
+        let (col, row) = (i % Self::KW_COLS, i / Self::KW_COLS);
+        Box2 {
+            x: Self::PAD + 2.0 + col as f32 * (cw + Self::GAP),
+            y: Self::kw_top() + Self::KW_BAR + Self::GAP + row as f32 * (Self::CHIP_H + Self::GAP),
+            w: cw,
+            h: Self::CHIP_H,
+        }
     }
 
     fn field_box() -> Box2 {
@@ -1049,7 +1097,7 @@ impl SearchPanel {
 
     fn content_h(&self) -> f32 {
         let rows = if self.rows.is_empty() { Self::ROW } else { self.rows.len() as f32 * Self::ROW };
-        Self::header_h() + rows + if self.more > 0 { Self::FOOT } else { 0.0 } + Self::PAD
+        self.header_h() + rows + if self.more > 0 { Self::FOOT } else { 0.0 } + Self::PAD
     }
 
     pub fn size(&self, s: f32, max_h: i32) -> (i32, i32) {
@@ -1060,8 +1108,8 @@ impl SearchPanel {
         (self.content_h() * s - h as f32).max(0.0)
     }
 
-    fn row_top(i: usize) -> f32 {
-        Self::header_h() + i as f32 * Self::ROW
+    fn row_top(&self, i: usize) -> f32 {
+        self.header_h() + i as f32 * Self::ROW
     }
 
     pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<SearchHit> {
@@ -1077,11 +1125,24 @@ impl SearchPanel {
             let on_clear = !self.query.is_empty() && ux >= field.x + field.w - Self::CLEAR_W;
             return Some(if on_clear { SearchHit::Clear } else { SearchHit::Field });
         }
-        if uy < Self::header_h() {
+        if uy < Self::kw_top() {
             return Self::chips().enumerate().find(|(i, _)| Self::chip_box(*i).contains(ux, uy)).map(|(_, k)| SearchHit::Category(k));
         }
+        if uy < Self::kw_top() + Self::KW_BAR {
+            let bar = Self::kw_bar_box();
+            if !bar.contains(ux, uy) {
+                return None;
+            }
+            let on_clear = self.keyword.is_some() && ux >= bar.x + bar.w - Self::CLEAR_W;
+            return Some(if on_clear { SearchHit::KeywordClear } else { SearchHit::KeywordBar });
+        }
+        if uy < self.header_h() {
+            return (0..KEYWORDS.len() + 1)
+                .find(|&i| Self::kw_chip_box(i).contains(ux, uy))
+                .map(|i| SearchHit::Keyword(i.checked_sub(1)));
+        }
         let cy = (y + self.scroll) / s;
-        let i = ((cy - Self::header_h()) / Self::ROW).floor();
+        let i = ((cy - self.header_h()) / Self::ROW).floor();
         (i >= 0.0 && (i as usize) < self.rows.len()).then_some(SearchHit::Row(i as usize))
     }
 
@@ -1091,18 +1152,18 @@ impl SearchPanel {
 
     /// Window-local vertical centre of a row.
     pub fn row_center(&self, i: usize, s: f32) -> Option<f32> {
-        (i < self.rows.len()).then(|| (Self::row_top(i) + Self::ROW / 2.0) * s - self.scroll)
+        (i < self.rows.len()).then(|| (self.row_top(i) + Self::ROW / 2.0) * s - self.scroll)
     }
 
     /// Scroll offset that brings row `i` into view in a window `h` tall.
     pub fn scroll_to(&self, i: usize, s: f32, h: i32) -> f32 {
-        let top = Self::row_top(i) * s;
+        let top = self.row_top(i) * s;
         let bottom = top + Self::ROW * s;
-        let view = h as f32 - Self::header_h() * s;
-        let scroll = if top - Self::header_h() * s < self.scroll {
-            top - Self::header_h() * s
-        } else if bottom - Self::header_h() * s > self.scroll + view {
-            bottom - Self::header_h() * s - view
+        let view = h as f32 - self.header_h() * s;
+        let scroll = if top - self.header_h() * s < self.scroll {
+            top - self.header_h() * s
+        } else if bottom - self.header_h() * s > self.scroll + view {
+            bottom - self.header_h() * s - view
         } else {
             self.scroll
         };
@@ -1116,7 +1177,7 @@ impl SearchPanel {
         ctx.panel(c);
         self.render_rows(c, ctx);
         // Header drawn last so scrolled rows slide under it.
-        let hh = Self::header_h() * s;
+        let hh = self.header_h() * s;
         if ctx.opaque {
             c.rect(0.0, 0.0, w, hh, t.bg_opaque);
         } else {
@@ -1128,6 +1189,7 @@ impl SearchPanel {
         ctx.label(c, &subtitle, 12.0 * s, 31.0 * s, 10.0, Weight::Medium, t.dim, Align::Left);
         self.render_field(c, ctx);
         self.render_chips(c, ctx);
+        self.render_keyword(c, ctx);
         c.rect(0.0, hh - 1.0, w, 1.0, t.border);
         let max_scroll = self.max_scroll(s, c.height() as i32);
         if max_scroll > 0.0 {
@@ -1210,13 +1272,78 @@ impl SearchPanel {
         }
     }
 
+    fn render_keyword(&self, c: &mut Canvas, ctx: &mut Ctx) {
+        let s = ctx.s;
+        let t = ctx.theme;
+        let (x, y, w, h) = Self::kw_bar_box().scaled(s);
+        let active = self.keyword.is_some();
+        let hover = matches!(self.hover, Some(SearchHit::KeywordBar | SearchHit::KeywordClear));
+        let fill = match (active, hover) {
+            (true, _) => t.accent,
+            (false, true) => t.button_hover,
+            (false, false) => t.button,
+        };
+        c.rrect(x, y, w, h, 5.0 * s, fill);
+        let cy = y + h / 2.0;
+        let on_color = if active { t.on_accent } else { t.dim };
+        ctx.label(c, "Keyword", x + 9.0 * s, cy, 10.5, Weight::Bold, on_color, Align::Left);
+        let value_x = x + 66.0 * s;
+        let value = self.keyword.and_then(|k| KEYWORDS.get(k)).map(|k| k.label).unwrap_or("Any");
+        ctx.label(c, value, value_x, cy, 12.0, Weight::Bold, if active { t.on_accent } else { t.text }, Align::Left);
+        if active {
+            let clear_hover = self.hover == Some(SearchHit::KeywordClear);
+            let cx = x + w - Self::CLEAR_W * s / 2.0;
+            if clear_hover {
+                c.circle(cx, cy, 8.5 * s, t.tint);
+            }
+            ctx.label(c, "×", cx, cy, 15.0, Weight::Bold, t.on_accent, Align::Center);
+        } else {
+            // Disclosure arrow: down when closed, up when open.
+            let (ax, aw, ah) = (x + w - 16.0 * s, 8.0 * s, 4.5 * s);
+            let (tip, base) = if self.filter_open { (cy - ah / 2.0, cy + ah / 2.0) } else { (cy + ah / 2.0, cy - ah / 2.0) };
+            c.triangle([(ax - aw / 2.0, base), (ax + aw / 2.0, base), (ax, tip)], t.dim);
+        }
+        if !self.filter_open {
+            return;
+        }
+        for i in 0..KEYWORDS.len() + 1 {
+            let (cx, cy, cw, ch) = Self::kw_chip_box(i).scaled(s);
+            let keyword = i.checked_sub(1);
+            let selected = keyword == self.keyword;
+            let hover = self.hover == Some(SearchHit::Keyword(keyword));
+            let fill = if selected {
+                t.accent
+            } else if hover {
+                t.button_hover
+            } else {
+                t.button
+            };
+            c.rrect(cx, cy, cw, ch, 4.0 * s, fill);
+            let label = keyword.map(|k| KEYWORDS[k].label).unwrap_or("Any");
+            // Shrink long labels a little before resorting to an ellipsis.
+            let mut px = 10.0;
+            while px > 8.5 && ctx.fonts.measure(label, px * s, Weight::Bold) > cw - 6.0 * s {
+                px -= 0.5;
+            }
+            let label = ctx.fonts.fit(label, px * s, Weight::Bold, cw - 6.0 * s);
+            let color = if selected {
+                t.on_accent
+            } else if hover {
+                t.text
+            } else {
+                t.soft
+            };
+            ctx.label(c, &label, cx + cw / 2.0, cy + ch / 2.0, px, Weight::Bold, color, Align::Center);
+        }
+    }
+
     fn render_rows(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
         let t = ctx.theme;
         let x = Self::PAD * s;
         let iw = c.width() - 2.0 * Self::PAD * s;
         let base = if ctx.opaque { t.bg_opaque } else { t.row };
-        let top = Self::header_h() * s - self.scroll;
+        let top = self.header_h() * s - self.scroll;
         if self.rows.is_empty() {
             let note = ctx.fonts.fit(&self.note, 11.5 * s, Weight::Medium, iw - 16.0 * s);
             ctx.label(c, &note, c.width() / 2.0, top + Self::ROW * s / 2.0, 11.5, Weight::Medium, t.dim, Align::Center);
@@ -1367,6 +1494,8 @@ pub struct InfoPanel {
     pub start_mmr: Option<i32>,
     pub current_mmr: Option<i32>,
     pub games: Vec<GameRow>,
+    /// "Latest Games" row under the pointer.
+    pub hover: Option<usize>,
     /// Unscaled width chosen by the layout.
     pub width: f32,
 }
@@ -1424,8 +1553,30 @@ impl InfoPanel {
             + Self::HEAD_H + Self::GAMES_COLS_H + games_count * Self::GAME_ROW_H
     }
 
+    /// Unscaled top of the "Latest Games" rows.
+    fn games_top() -> f32 {
+        Self::HEAD_H + Self::MINIONS_BODY_H
+            + Self::HEAD_H + Self::MMR_BODY_H
+            + Self::HEAD_H + Self::GAMES_COLS_H
+    }
+
     pub fn size(&self, s: f32) -> (i32, i32) {
         (s_ceil(self.width, s), s_ceil(self.height(), s))
+    }
+
+    /// "Latest Games" row under a window-local point.
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<usize> {
+        let (ux, uy) = (x / s, y / s);
+        if ux < 0.0 || ux >= self.width || uy < Self::games_top() {
+            return None;
+        }
+        let i = ((uy - Self::games_top()) / Self::GAME_ROW_H).floor() as usize;
+        (i < self.games.len()).then_some(i)
+    }
+
+    /// Window-local vertical centre of a game row.
+    pub fn row_center(&self, i: usize, s: f32) -> Option<f32> {
+        (i < self.games.len()).then(|| (Self::games_top() + (i as f32 + 0.5) * Self::GAME_ROW_H) * s)
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1515,7 +1666,7 @@ impl InfoPanel {
             let row_h = Self::GAME_ROW_H * s;
             ctx.label(c, "No games yet", 8.0 * s, y + row_h / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
         } else {
-            for game in &self.games {
+            for (i, game) in self.games.iter().enumerate() {
                 let row_h = Self::GAME_ROW_H * s;
                 let mid_y = y + row_h / 2.0;
 
@@ -1532,8 +1683,14 @@ impl InfoPanel {
                     }
                 }
 
+                // Hover: pointing here previews the game's final board.
+                if self.hover == Some(i) {
+                    c.rect(0.0, y, w, row_h, t.tint);
+                    c.rect(0.0, y, 3.0 * s, row_h, t.gold);
+                }
+
                 // Hero name
-                let name = ctx.fonts.fit(&game.hero_name, 11.0 * s, Weight::Bold, place_x - 14.0 * s);
+                let name = ctx.fonts.fit(&game.hero_name, 11.0 * s, Weight::Bold, place_x - 8.0 * s - 14.0 * s);
                 ctx.label_shadow_align(c, &name, 8.0 * s, mid_y, 11.0, Weight::Bold, t.text, Align::Left);
 
                 // Placement (ordinal: 1st, 2nd, etc.)
@@ -1560,7 +1717,7 @@ impl InfoPanel {
     }
 }
 
-// ---- opponent board popup ------------------------------------------------
+// ---- opponent and final-board popups --------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MinionView {
@@ -1569,7 +1726,7 @@ pub struct MinionView {
     pub attack: i32,
     pub health: i32,
     pub golden: bool,
-    pub keywords: Vec<&'static str>,
+    pub keywords: Vec<String>,
 }
 
 /// One combat's worth of an opponent's board.
@@ -1578,6 +1735,167 @@ pub struct BoardView {
     pub turn: i32,
     pub tier: i32,
     pub minions: Vec<MinionView>,
+}
+
+/// A board laid out like in game: up to seven minions side by side.
+const MINION_SLOTS: usize = 7;
+const MINION_GAP: f32 = 6.0;
+/// Portrait width at the full size; the other modes scale off it.
+const MINION_W: f32 = 64.0;
+
+/// Width of one minion slot; text mode keeps it for the name and gems.
+fn minion_slot_w(compact: CompactMode) -> f32 {
+    match compact {
+        CompactMode::Small => 40.0,
+        _ => MINION_W,
+    }
+}
+
+/// Portrait height; none in text mode.
+fn minion_portrait_h(compact: CompactMode) -> f32 {
+    match compact {
+        CompactMode::Small => 50.0,
+        CompactMode::Text => 0.0,
+        CompactMode::Full => 82.0,
+    }
+}
+
+/// Portrait, the stat gems hanging below it and a two-line name; in text
+/// mode the gems and name alone, without any art.
+fn minion_row_h(compact: CompactMode) -> f32 {
+    match compact {
+        CompactMode::Text => 6.0 + 48.0,
+        _ => 8.0 + minion_portrait_h(compact) + 8.0 + 24.0,
+    }
+}
+
+/// Centred top-left `x` for `n` minions in a board `w` wide.
+fn minions_x0(n: usize, w: f32, compact: CompactMode) -> f32 {
+    let n = n.clamp(1, MINION_SLOTS) as f32;
+    let mw = minion_slot_w(compact);
+    (w - (n * mw + (n - 1.0) * MINION_GAP)) / 2.0
+}
+
+fn draw_minion(c: &mut Canvas, ctx: &mut Ctx, compact: CompactMode, m: &MinionView, x: f32, y: f32) {
+    let s = ctx.s;
+    let t = ctx.theme;
+    let mw = minion_slot_w(compact);
+    let has = |k: &str| m.keywords.iter().any(|kw| kw == k);
+    // Letters for the keywords: every one of them in text mode (there is
+    // no art to hint at them), only the ones without a look otherwise.
+    let letters: &[(&str, &str, Rgba)] = if compact == CompactMode::Text {
+        &[
+            ("Taunt", "T", Rgba(132, 136, 148, 255)),
+            ("Shield", "D", Rgba(255, 214, 90, 255)),
+            ("Reborn", "R", Rgba(110, 220, 255, 255)),
+            ("Stealth", "S", Rgba(120, 90, 180, 255)),
+            ("Venomous", "V", Rgba(70, 170, 60, 255)),
+            ("Windfury", "W", Rgba(70, 150, 220, 255)),
+            ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
+        ]
+    } else {
+        &[
+            ("Venomous", "V", Rgba(70, 170, 60, 255)),
+            ("Windfury", "W", Rgba(70, 150, 220, 255)),
+            ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
+        ]
+    };
+    let badges: Vec<(&str, Rgba)> = letters.iter().filter(|(k, ..)| has(k)).map(|(_, l, col)| (*l, *col)).collect();
+    if compact == CompactMode::Text {
+        let (w, h) = (mw * s, 58.0 * s);
+        let r = 5.0 * s;
+        c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
+        let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
+        c.stroke_rrect(x, y, w, h, r, 1.0, frame);
+        // Gems at the top corners, where the game hangs them.
+        let gy = y + 12.0 * s;
+        for (cx, value, color) in [(x + 10.0 * s, m.attack, t.attack), (x + w - 10.0 * s, m.health, t.health)] {
+            c.circle(cx, gy, 8.5 * s, Rgba(0, 0, 0, 220));
+            c.circle(cx, gy, 7.0 * s, color);
+            let text = value.to_string();
+            let px = if text.len() >= 3 { 8.0 } else { 10.0 };
+                c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
+            }
+            // Keyword letters on their own row under the gems.
+            let bw = 11.0 * s;
+        let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
+        for (i, (label, col)) in badges.iter().enumerate() {
+            let (cx, cy) = (bx0 + i as f32 * bw, y + 27.0 * s);
+            c.circle(cx, cy, 4.5 * s, Rgba(0, 0, 0, 200));
+            c.circle(cx, cy, 3.5 * s, *col);
+            ctx.label(c, label, cx, cy, 7.0, Weight::Bold, t.on_accent, Align::Center);
+        }
+        let lines = ctx.fonts.wrap(&m.name, 9.0 * s, Weight::Bold, w - 4.0 * s);
+        let name_color = if m.golden { t.gold } else { t.text };
+        for (i, line) in lines.iter().take(2).enumerate() {
+            let cy = y + 41.0 * s + i as f32 * 10.0 * s;
+            ctx.label(c, line, x + w / 2.0, cy, 9.0, Weight::Bold, name_color, Align::Center);
+        }
+        return;
+    }
+    let (w, h) = (mw * s, minion_portrait_h(compact) * s);
+    let r = w / 2.0;
+    // Everything around the art shrinks with it in "small" mode.
+    let k = mw / MINION_W;
+    if has("Taunt") {
+        // Stone shield behind the portrait.
+        let (tx, ty, tw, th) = (x - 4.0 * k * s, y - 3.0 * k * s, w + 8.0 * k * s, h + 5.0 * k * s);
+        c.rrect(tx, ty, tw, th, 12.0 * k * s, Rgba(132, 136, 148, 255));
+        c.stroke_rrect(tx, ty, tw, th, 12.0 * k * s, 1.5 * s, Rgba(60, 62, 72, 255));
+    }
+    c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
+    if let Some(img) = ctx.images.get(ImageKind::Portrait, &m.card_id) {
+        c.image_cover(&img, x, y, w, h, r, 1.0);
+    } else if let Some(img) = ctx.images.get(ImageKind::Tile, &m.card_id) {
+        c.image_cover(&img, x, y, w, h, r, 1.0);
+    }
+    if has("Stealth") {
+        c.rrect(x, y, w, h, r, Rgba(20, 10, 40, 110));
+    }
+    if has("Reborn") {
+        c.rrect(x, y, w, h, r, Rgba(110, 220, 255, 60));
+    }
+    let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
+    c.stroke_rrect(x, y, w, h, r, 2.0 * k * s, frame);
+    if has("Shield") {
+        c.stroke_rrect(
+            x - 2.5 * k * s,
+            y - 2.5 * k * s,
+            w + 5.0 * k * s,
+            h + 5.0 * k * s,
+            r + 2.5 * k * s,
+            3.0 * k * s,
+            Rgba(255, 214, 90, 210),
+        );
+    }
+    let bw = 14.0 * k * s;
+    let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
+    for (i, (label, col)) in badges.iter().enumerate() {
+        let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * k * s);
+        c.circle(cx, cy, 6.5 * k * s, Rgba(0, 0, 0, 200));
+        c.circle(cx, cy, 5.5 * k * s, *col);
+        ctx.label(c, label, cx, cy, (8.0 * k).max(7.0), Weight::Bold, t.on_accent, Align::Center);
+    }
+    // Stats where the game puts them.
+    let gy = y + h - 6.0 * k * s;
+    for (cx, value, color) in [(x + 9.0 * k * s, m.attack, t.attack), (x + w - 9.0 * k * s, m.health, t.health)] {
+        c.circle(cx, gy, 11.5 * k * s, Rgba(0, 0, 0, 220));
+        c.circle(cx, gy, 10.0 * k * s, color);
+        let text = value.to_string();
+        let px = match text.len() {
+            1 | 2 => 12.5,
+            3 => 10.0,
+            _ => 8.5,
+        } * k;
+        // The gems are always bright, so their number keeps a dark shadow.
+        c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
+    }
+    let lines = ctx.fonts.wrap(&m.name, 9.5 * k * s, Weight::Bold, w + MINION_GAP * k * s - 2.0 * s);
+    let name_color = if m.golden { t.gold } else { t.text };
+    for (i, line) in lines.iter().take(2).enumerate() {
+        let cy = y + h + (15.0 + i as f32 * 11.0) * k * s;
+        ctx.label(c, line, x + w / 2.0, cy, 9.5 * k, Weight::Bold, name_color, Align::Center);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1607,43 +1925,23 @@ impl OpponentPopup {
     const CHIP_H: f32 = 20.0;
     const GAP: f32 = 4.0;
     const BOARD_HEAD: f32 = 22.0;
-    /// A board laid out like in game: up to seven minions side by side.
-    const SLOTS: usize = 7;
-    const MINION_GAP: f32 = 6.0;
-    /// Portrait width at the full size; the other modes scale off it.
-    const MINION_W: f32 = 64.0;
     const ROW: f32 = 32.0;
     const MORE: f32 = 20.0;
     const PAD: f32 = 6.0;
 
     /// Width of one minion slot; text mode keeps it for the name and gems.
     fn minion_w(&self) -> f32 {
-        match self.compact {
-            CompactMode::Small => 40.0,
-            _ => Self::MINION_W,
-        }
-    }
-
-    /// Height of a minion portrait; none in text mode.
-    fn portrait_h(&self) -> f32 {
-        match self.compact {
-            CompactMode::Small => 50.0,
-            CompactMode::Text => 0.0,
-            CompactMode::Full => 82.0,
-        }
+        minion_slot_w(self.compact)
     }
 
     /// Portrait, the stat gems hanging below it and a two-line name; in text
     /// mode the gems and name alone, without any art.
     fn minions_h(&self) -> f32 {
-        match self.compact {
-            CompactMode::Text => 6.0 + 48.0,
-            _ => 8.0 + self.portrait_h() + 8.0 + 24.0,
-        }
+        minion_row_h(self.compact)
     }
 
     fn w(&self) -> f32 {
-        Self::PAD * 2.0 + Self::SLOTS as f32 * self.minion_w() + (Self::SLOTS - 1) as f32 * Self::MINION_GAP
+        Self::PAD * 2.0 + MINION_SLOTS as f32 * self.minion_w() + (MINION_SLOTS - 1) as f32 * MINION_GAP
     }
 
     fn chips_h(&self) -> f32 {
@@ -1798,140 +2096,87 @@ impl OpponentPopup {
         }
         // Centred like the game centres a board that is not full.
         let mw = self.minion_w();
-        let n = b.minions.len().min(Self::SLOTS) as f32;
-        let row_w = n * mw + (n - 1.0) * Self::MINION_GAP;
-        let x0 = (self.w() - row_w) / 2.0;
+        let x0 = minions_x0(b.minions.len(), self.w(), self.compact);
         let top = if self.compact == CompactMode::Text { 6.0 } else { 8.0 };
-        for (i, m) in b.minions.iter().take(Self::SLOTS).enumerate() {
-            let mx = (x0 + i as f32 * (mw + Self::MINION_GAP)) * s;
-            self.render_minion(c, ctx, m, mx, y + top * s);
+        for (i, m) in b.minions.iter().take(MINION_SLOTS).enumerate() {
+            let mx = (x0 + i as f32 * (mw + MINION_GAP)) * s;
+            draw_minion(c, ctx, self.compact, m, mx, y + top * s);
         }
         y + self.minions_h() * s
     }
+}
 
-    /// One minion as on the game board: portrait, attack bottom left,
-    /// health bottom right, keyword effects around it, name below. Text mode
-    /// keeps the stats, keywords and name but drops the art entirely.
-    fn render_minion(&self, c: &mut Canvas, ctx: &mut Ctx, m: &MinionView, x: f32, y: f32) {
+// ---- final board popup ----------------------------------------------------
+
+/// The player's board from their last combat in a finished game, shown while
+/// a "Latest Games" row in the session panel is hovered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FinalBoardPopup {
+    pub hero_name: String,
+    pub hero_card_id: String,
+    pub place: i32,
+    /// The board the player had left; `None` when nothing was recorded.
+    pub board: Option<BoardView>,
+    pub images_rev: u64,
+    /// How the minion portraits are drawn; shrinks the whole board.
+    pub compact: CompactMode,
+}
+
+impl FinalBoardPopup {
+    const HEAD: f32 = 46.0;
+    const PAD: f32 = 6.0;
+    const NOTE_H: f32 = 26.0;
+
+    fn w(&self) -> f32 {
+        let n = self.board.as_ref().map_or(1, |b| b.minions.len().clamp(1, MINION_SLOTS)) as f32;
+        Self::PAD * 2.0 + n * minion_slot_w(self.compact) + (n - 1.0) * MINION_GAP
+    }
+
+    fn content_h(&self) -> f32 {
+        match &self.board {
+            Some(b) if !b.minions.is_empty() => Self::HEAD + minion_row_h(self.compact) + Self::PAD,
+            _ => Self::HEAD + Self::NOTE_H,
+        }
+    }
+
+    pub fn size(&self, s: f32) -> (i32, i32) {
+        (s_ceil(self.w(), s), s_ceil(self.content_h(), s))
+    }
+
+    pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
         let s = ctx.s;
         let t = ctx.theme;
-        let mw = self.minion_w();
-        let has = |k: &str| m.keywords.contains(&k);
-        // Letters for the keywords: every one of them in text mode (there is
-        // no art to hint at them), only the ones without a look otherwise.
-        let letters: &[(&str, &str, Rgba)] = if self.compact == CompactMode::Text {
-            &[
-                ("Taunt", "T", Rgba(132, 136, 148, 255)),
-                ("Shield", "D", Rgba(255, 214, 90, 255)),
-                ("Reborn", "R", Rgba(110, 220, 255, 255)),
-                ("Stealth", "S", Rgba(120, 90, 180, 255)),
-                ("Venomous", "V", Rgba(70, 170, 60, 255)),
-                ("Windfury", "W", Rgba(70, 150, 220, 255)),
-                ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
-            ]
-        } else {
-            &[
-                ("Venomous", "V", Rgba(70, 170, 60, 255)),
-                ("Windfury", "W", Rgba(70, 150, 220, 255)),
-                ("Mega-Windfury", "M", Rgba(70, 110, 230, 255)),
-            ]
+        ctx.panel(c);
+        let w = c.width();
+        let x = Self::PAD * s;
+        let iw = w - 2.0 * Self::PAD * s;
+        // Header: hero art strip behind the name and the result.
+        let hh = (Self::HEAD - Self::PAD) * s;
+        ctx.tile_row(c, &self.hero_card_id, x, x, iw, hh, t.header);
+        let name = ctx.fonts.fit(&self.hero_name, 14.0 * s, Weight::Bold, iw - 20.0 * s);
+        ctx.label_shadow(c, &name, x + 10.0 * s, x + 15.0 * s, 14.0, Weight::Bold, t.text);
+        let sub = match &self.board {
+            Some(b) => format!("{} · final board · Turn {} · Tier {}", ordinal(self.place), b.turn, b.tier),
+            None => format!("{} · final board not recorded", ordinal(self.place)),
         };
-        let badges: Vec<(&str, Rgba)> =
-            letters.iter().filter(|(k, ..)| has(k)).map(|(_, l, col)| (*l, *col)).collect();
-        if self.compact == CompactMode::Text {
-            let (w, h) = (mw * s, 58.0 * s);
-            let r = 5.0 * s;
-            c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
-            let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
-            c.stroke_rrect(x, y, w, h, r, 1.0, frame);
-            // Gems at the top corners, where the game hangs them.
-            let gy = y + 12.0 * s;
-            for (cx, value, color) in [(x + 10.0 * s, m.attack, t.attack), (x + w - 10.0 * s, m.health, t.health)] {
-                c.circle(cx, gy, 8.5 * s, Rgba(0, 0, 0, 220));
-                c.circle(cx, gy, 7.0 * s, color);
-                let text = value.to_string();
-                let px = if text.len() >= 3 { 8.0 } else { 10.0 };
-                c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
-            }
-            // Keyword letters on their own row under the gems.
-            let bw = 11.0 * s;
-            let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
-            for (i, (label, col)) in badges.iter().enumerate() {
-                let (cx, cy) = (bx0 + i as f32 * bw, y + 27.0 * s);
-                c.circle(cx, cy, 4.5 * s, Rgba(0, 0, 0, 200));
-                c.circle(cx, cy, 3.5 * s, *col);
-                ctx.label(c, label, cx, cy, 7.0, Weight::Bold, t.on_accent, Align::Center);
-            }
-            let lines = ctx.fonts.wrap(&m.name, 9.0 * s, Weight::Bold, w - 4.0 * s);
-            let name_color = if m.golden { t.gold } else { t.text };
-            for (i, line) in lines.iter().take(2).enumerate() {
-                let cy = y + 41.0 * s + i as f32 * 10.0 * s;
-                ctx.label(c, line, x + w / 2.0, cy, 9.0, Weight::Bold, name_color, Align::Center);
-            }
+        let sub = ctx.fonts.fit(&sub, 11.0 * s, Weight::Medium, iw - 20.0 * s);
+        ctx.label_shadow(c, &sub, x + 10.0 * s, x + 34.0 * s, 11.0, Weight::Medium, t.dim);
+        let y = Self::HEAD * s;
+        let Some(b) = &self.board else {
+            ctx.label(c, "Finished without a recorded combat", w / 2.0, y + Self::NOTE_H * s / 2.0, 11.5, Weight::Medium, t.dim, Align::Center);
+            return;
+        };
+        if b.minions.is_empty() {
+            ctx.label(c, "Empty board", w / 2.0, y + Self::NOTE_H * s / 2.0, 12.0, Weight::Medium, t.dim, Align::Center);
             return;
         }
-        let (w, h) = (mw * s, self.portrait_h() * s);
-        let r = w / 2.0;
-        // Everything around the art shrinks with it in "small" mode.
-        let k = mw / Self::MINION_W;
-        if has("Taunt") {
-            // Stone shield behind the portrait.
-            let (tx, ty, tw, th) = (x - 4.0 * k * s, y - 3.0 * k * s, w + 8.0 * k * s, h + 5.0 * k * s);
-            c.rrect(tx, ty, tw, th, 12.0 * k * s, Rgba(132, 136, 148, 255));
-            c.stroke_rrect(tx, ty, tw, th, 12.0 * k * s, 1.5 * s, Rgba(60, 62, 72, 255));
-        }
-        c.rrect(x, y, w, h, r, Rgba(30, 34, 48, 255));
-        if let Some(img) = ctx.images.get(ImageKind::Portrait, &m.card_id) {
-            c.image_cover(&img, x, y, w, h, r, 1.0);
-        } else if let Some(img) = ctx.images.get(ImageKind::Tile, &m.card_id) {
-            c.image_cover(&img, x, y, w, h, r, 1.0);
-        }
-        if has("Stealth") {
-            c.rrect(x, y, w, h, r, Rgba(20, 10, 40, 110));
-        }
-        if has("Reborn") {
-            c.rrect(x, y, w, h, r, Rgba(110, 220, 255, 60));
-        }
-        let frame = if m.golden { t.gold } else { Rgba(96, 84, 70, 255) };
-        c.stroke_rrect(x, y, w, h, r, 2.0 * k * s, frame);
-        if has("Shield") {
-            c.stroke_rrect(
-                x - 2.5 * k * s,
-                y - 2.5 * k * s,
-                w + 5.0 * k * s,
-                h + 5.0 * k * s,
-                r + 2.5 * k * s,
-                3.0 * k * s,
-                Rgba(255, 214, 90, 210),
-            );
-        }
-        let bw = 14.0 * k * s;
-        let bx0 = x + w / 2.0 - (badges.len() as f32 * bw) / 2.0 + bw / 2.0;
-        for (i, (label, col)) in badges.iter().enumerate() {
-            let (cx, cy) = (bx0 + i as f32 * bw, y + 4.0 * k * s);
-            c.circle(cx, cy, 6.5 * k * s, Rgba(0, 0, 0, 200));
-            c.circle(cx, cy, 5.5 * k * s, *col);
-            ctx.label(c, label, cx, cy, (8.0 * k).max(7.0), Weight::Bold, t.on_accent, Align::Center);
-        }
-        // Stats where the game puts them.
-        let gy = y + h - 6.0 * k * s;
-        for (cx, value, color) in [(x + 9.0 * k * s, m.attack, t.attack), (x + w - 9.0 * k * s, m.health, t.health)] {
-            c.circle(cx, gy, 11.5 * k * s, Rgba(0, 0, 0, 220));
-            c.circle(cx, gy, 10.0 * k * s, color);
-            let text = value.to_string();
-            let px = match text.len() {
-                1 | 2 => 12.5,
-                3 => 10.0,
-                _ => 8.5,
-            } * k;
-            // The gems are always bright, so their number keeps a dark shadow.
-            c.text_shadow(ctx.fonts, &text, cx, ctx.mid(gy, px * s, Weight::Bold), px * s, Weight::Bold, t.on_accent, Align::Center, Rgba(0, 0, 0, 200));
-        }
-        let lines = ctx.fonts.wrap(&m.name, 9.5 * k * s, Weight::Bold, w + Self::MINION_GAP * k * s - 2.0 * s);
-        let name_color = if m.golden { t.gold } else { t.text };
-        for (i, line) in lines.iter().take(2).enumerate() {
-            let cy = y + h + (15.0 + i as f32 * 11.0) * k * s;
-            ctx.label(c, line, x + w / 2.0, cy, 9.5 * k, Weight::Bold, name_color, Align::Center);
+        let mw = minion_slot_w(self.compact);
+        let x0 = minions_x0(b.minions.len(), self.w(), self.compact);
+        // The gems hang below the portrait, so the row keeps a little air.
+        let top = if self.compact == CompactMode::Text { 6.0 } else { 8.0 };
+        for (i, m) in b.minions.iter().take(MINION_SLOTS).enumerate() {
+            let mx = (x0 + i as f32 * (mw + MINION_GAP)) * s;
+            draw_minion(c, ctx, self.compact, m, mx, y + top * s);
         }
     }
 }
@@ -2365,10 +2610,20 @@ mod tests {
                     mmr_delta: Some(70),
                 },
             ],
+            hover: None,
             width: 190.0,
         };
         // Height: 18 + 56 + 18 + 40 + 18 + 16 + 2 * 24 = 214
         assert_eq!(panel.size(1.0), (190, 214));
+        // Hover over the rows area highlights the game under the pointer.
+        assert_eq!(panel.hit(80.0, 172.0, 1.0), Some(0));
+        assert_eq!(panel.hit(80.0, 210.0, 1.0), Some(1));
+        assert_eq!(panel.hit(80.0, 214.0, 1.0), None, "below the second row");
+        assert_eq!(panel.hit(80.0, 100.0, 1.0), None, "MMR section does not hover");
+        assert_eq!(panel.row_center(1, 2.0), Some((166.0 + 1.5 * 24.0) * 2.0));
+        let mut hovered = panel.clone();
+        hovered.hover = Some(1);
+        assert_ne!(hovered, panel, "the hover is part of the model");
 
         let (w, h) = panel.size(1.0);
         let mut canvas = Canvas::new(w, h);
@@ -2377,6 +2632,88 @@ mod tests {
         let mut ctx = Ctx { fonts: &mut fonts, images: &mut images, theme: Theme::DARK, compact: CompactMode::Full, s: 1.0, opaque: false };
         panel.render(&mut canvas, &mut ctx);
         canvas.pixmap.save_png("/tmp/test_info_panel.png").unwrap();
+    }
+
+    #[test]
+    fn final_board_popup_scales_with_rows_and_compact_mode() {
+        let minion = |name: &str| MinionView {
+            card_id: "B1".into(),
+            name: name.into(),
+            attack: 3,
+            health: 2,
+            golden: false,
+            keywords: vec!["Taunt".into()],
+        };
+        let popup = |n: usize| FinalBoardPopup {
+            hero_name: "Tickatus".into(),
+            hero_card_id: "H1".into(),
+            place: 3,
+            board: Some(BoardView {
+                turn: 12,
+                tier: 5,
+                minions: (0..n).map(|i| minion(&format!("M{i}"))).collect(),
+            }),
+            images_rev: 0,
+            compact: CompactMode::Full,
+        };
+        let (w3, _) = popup(3).size(1.0);
+        let w2 = popup(2).size(1.0).0;
+        assert!(w3 > w2, "the popup widens with the board: {w2} → {w3}");
+        assert_eq!(popup(9).size(1.0), popup(7).size(1.0), "seven minions is the cap");
+        let w7 = popup(7).size(1.0).0;
+        // One minion short of full: the text mode keeps the slot widths.
+        assert_eq!(popup(7).size(1.0).1, popup(6).size(1.0).1);
+        // Nothing recorded: a short note instead of an empty board.
+        let none = FinalBoardPopup {
+            hero_name: "H".into(),
+            hero_card_id: "H1".into(),
+            place: 4,
+            board: None,
+            images_rev: 0,
+            compact: CompactMode::Full,
+        };
+        assert!(none.size(1.0).1 < popup(1).size(1.0).1);
+        assert!(w7 > 0);
+    }
+
+    #[test]
+    fn final_board_popup_renders_all_compact_modes() {
+        let minion = MinionView {
+            card_id: "B2".into(),
+            name: "Bristleback Knight".into(),
+            attack: 7,
+            health: 3,
+            golden: false,
+            keywords: vec!["Taunt".into(), "Shield".into()],
+        };
+        for (mode, name) in [(CompactMode::Full, "full"), (CompactMode::Small, "small"), (CompactMode::Text, "text")] {
+            let p = FinalBoardPopup {
+                hero_name: "Mutanus".into(),
+                hero_card_id: "H1".into(),
+                place: 1,
+                board: Some(BoardView {
+                    turn: 9,
+                    tier: 4,
+                    minions: vec![minion.clone(), minion.clone()],
+                }),
+                images_rev: 0,
+                compact: mode,
+            };
+            let (w, h) = p.size(1.0);
+            let mut canvas = Canvas::new(w, h);
+            let mut fonts = Fonts::load();
+            let mut images = Images::new();
+            let mut ctx = Ctx {
+                fonts: &mut fonts,
+                images: &mut images,
+                theme: Theme::DARK,
+                compact: mode,
+                s: 1.0,
+                opaque: false,
+            };
+            p.render(&mut canvas, &mut ctx);
+            canvas.pixmap.save_png(format!("/tmp/test_final_board_{name}.png")).unwrap();
+        }
     }
 
     #[test]

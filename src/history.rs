@@ -11,6 +11,27 @@ const KEEP: usize = 300;
 /// Games further apart than this belong to different sessions.
 const SESSION_GAP_SECS: u64 = 3 * 3600;
 
+/// One minion of a finished game's final board, frozen at game end.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StoredMinion {
+    pub card_id: String,
+    pub name: String,
+    pub attack: i32,
+    pub health: i32,
+    pub golden: bool,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+}
+
+/// The player's board as of their last combat: what the session panel shows
+/// when a "Latest Games" row is hovered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct StoredBoard {
+    pub turn: i32,
+    pub tier: i32,
+    pub minions: Vec<StoredMinion>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GameRecord {
     pub id: String,
@@ -24,6 +45,8 @@ pub struct GameRecord {
     pub rating: Option<i32>,
     #[serde(default)]
     pub mmr_delta: Option<i32>,
+    #[serde(default)]
+    pub board: Option<StoredBoard>,
 }
 
 pub struct History {
@@ -112,6 +135,7 @@ mod tests {
             tribes: vec![],
             rating: None,
             mmr_delta: None,
+            board: None,
         }
     }
 
@@ -121,5 +145,30 @@ mod tests {
         let s = h.session(22_000);
         assert_eq!(s.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), vec!["c", "b"]);
         assert!(h.session(100_000).is_empty());
+    }
+
+    #[test]
+    fn board_roundtrips_and_old_records_still_load() {
+        let board = StoredBoard {
+            turn: 12,
+            tier: 5,
+            minions: vec![StoredMinion {
+                card_id: "BG25_500".into(),
+                name: "Bristleback Knight".into(),
+                attack: 7,
+                health: 3,
+                golden: false,
+                keywords: vec!["Taunt".into(), "Divine Shield".into()],
+            }],
+        };
+        let g = GameRecord {
+            board: Some(board),
+            ..rec("a", 1, 1_000)
+        };
+        let back: GameRecord = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+        // A record written before boards were stored still loads.
+        let old: GameRecord = serde_json::from_str(r#"{"id":"a","hero":"H","place":1,"turn":10,"ended_at":1000}"#).unwrap();
+        assert_eq!(old.board, None);
     }
 }
