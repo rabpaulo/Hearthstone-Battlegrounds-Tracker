@@ -14,7 +14,7 @@ só para as tribos da lobby, um campo da memória do cliente.
 | Comps do meta | botão **Comps** no topo | Tier list de comps do HSReplay filtrada pelas tribos da lobby; clique abre o guia da comp |
 | Busca de cartas | botão **Search** no topo | Busca aproximada (fuzzy) por nome, filtrada por tipo de carta; hover ou setas mostram a carta |
 | Lista de minions | direita | Clique num tier: minions agrupados por tribo + feitiços com custo. Hover mostra a carta, roda do mouse rola, botão direito fecha |
-| Painel da sessão (HDT) | esquerda | **Available Minions** (ícones circulares das 5 tribos da lobby com anel verde), **MMR** (Start / Current) e **Latest Games** (arte do herói com fade à esquerda, colocação ordinal 1st/2nd/etc. e delta de MMR) |
+| Painel da sessão (HDT) | esquerda | **Available Minions** (ícones circulares das 5 tribos da lobby com anel verde), **MMR** (Start / Current) e **Latest Games** (arte do herói com fade à esquerda, colocação ordinal 1st/2nd/etc. e delta de MMR; o herói aparece sem a skin usada — "Soggy Yoggy" vira Yogg-Saron) |
 | Tabuleiro do oponente | topo, centro (ao passar o mouse no leaderboard) | Um botão por turno em que você enfrentou o jogador; clique para mostrar ou esconder o tabuleiro daquele turno (o mais recente vem ligado), logo abaixo das chances de combate. Cada tabuleiro aparece na horizontal como no jogo: retrato do lacaio com ataque embaixo à esquerda e vida embaixo à direita, taunt, escudo divino, dourado e outras palavras-chave marcados, além do tier e de há quantos turnos; o popup continua aberto com o mouse sobre ele |
 
 Não incluído: estatísticas exclusivas do HSReplay Premium (estatísticas pagas de heróis no meta).
@@ -219,7 +219,9 @@ RUST_LOG=debug hsbg-overlay                  # log detalhado (inclui o simulador
   outro trabalho, para os resultados aparecerem sem download enquanto você
   digita.
 - `src/cards.rs`: base de cartas do export da Firestone, com as categorias da
-  busca (minion, feitiço, herói, trinket, anomalia, recompensa).
+  busca (minion, feitiço, herói, trinket, anomalia, recompensa). Também resolve
+  skins de herói para o herói base (campo `battlegroundsHeroParentDbfId`), usado
+  no painel da sessão e nos enablers de comps.
 - `src/search.rs`: busca aproximada por nome (prefixo, palavras fora de ordem,
   abreviações e erros de digitação), usada pelo painel **Search**.
 - `src/ui/theme.rs`: paletas de cores centralizadas (Dark, Light, High Contrast)

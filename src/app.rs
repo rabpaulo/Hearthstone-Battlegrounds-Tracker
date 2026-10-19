@@ -659,8 +659,7 @@ impl Overlay {
 
     /// The player's hero as hero stats name it, without its skin.
     fn base_hero(&self) -> Option<&str> {
-        let id = &self.game.local_hero()?.card_id;
-        Some(id.split("_SKIN_").next().unwrap_or(id))
+        Some(self.db.base_hero(&self.game.local_hero()?.card_id))
     }
 
     /// The guide of one comp: its cards, its hero enablers, then the strategy text.
@@ -812,18 +811,17 @@ impl Overlay {
 
     pub fn info_panel(&mut self, width: f32) -> InfoPanel {
         let latest = self.history.latest(5);
-        for g in &latest {
-            self.images.prefetch(ImageKind::Tile, &g.hero);
-        }
-        let games: Vec<GameRow> = latest
-            .into_iter()
-            .map(|g| GameRow {
-                hero_card_id: g.hero.clone(),
-                hero_name: self.db.name(&g.hero).to_string(),
+        let mut games = Vec::with_capacity(latest.len());
+        for g in latest {
+            let hero = self.db.base_hero(&g.hero);
+            self.images.prefetch(ImageKind::Tile, hero);
+            games.push(GameRow {
+                hero_card_id: hero.to_string(),
+                hero_name: self.db.name(hero).to_string(),
                 place: g.place,
                 mmr_delta: g.mmr_delta.or_else(|| Some(placement_delta(g.place))),
-            })
-            .collect();
+            });
+        }
 
         let session = self.history.session(history::now_secs());
         let session_delta: i32 = session
@@ -2094,6 +2092,29 @@ mod tests {
         assert!(!ov.lobby_tribes().from_game);
         ov.set_lobby_memory(memory(2, &LOBBY));
         assert!(ov.lobby_tribes().from_game);
+    }
+
+    #[test]
+    fn latest_games_name_heroes_without_their_skin() {
+        let cards = r#"[
+            {"id":"H1","dbfId":10,"name":"Yogg-Saron, Hope's End","type":"Hero","battlegroundsHero":true},
+            {"id":"H1_SKIN_A","dbfId":11,"name":"Soggy Yoggy","type":"Hero","battlegroundsHeroParentDbfId":10}
+        ]"#;
+        let mut ov = overlay();
+        ov.db = CardDb::parse(cards.as_bytes(), Path::new("test")).unwrap();
+        ov.history = History::in_memory(vec![GameRecord {
+            id: "g1".into(),
+            hero: "H1_SKIN_A".into(),
+            place: 4,
+            turn: 12,
+            ended_at: 1,
+            tribes: vec![],
+            rating: None,
+            mmr_delta: Some(10),
+        }]);
+        let panel = ov.info_panel(200.0);
+        assert_eq!(panel.games[0].hero_card_id, "H1");
+        assert_eq!(panel.games[0].hero_name, "Yogg-Saron, Hope's End");
     }
 
     #[test]

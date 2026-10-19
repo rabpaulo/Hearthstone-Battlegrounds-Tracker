@@ -223,6 +223,8 @@ struct RawCard {
     text: String,
     #[serde(default)]
     battlegrounds_hero: bool,
+    /// dbf id of the hero a skin was made for.
+    battlegrounds_hero_parent_dbf_id: Option<i32>,
 }
 
 /// Search category of a raw card: tavern cards, playable heroes, and the
@@ -252,10 +254,18 @@ fn keyword_bits(r: &RawCard) -> u32 {
     bits
 }
 
+/// A hero's id without its skin: `TB_BaconShop_HERO_35_SKIN_A` is still
+/// Yogg-Saron. Only a fallback for skins missing from the card database.
+fn base_hero_id(id: &str) -> &str {
+    id.split_once("_SKIN_").map_or(id, |(hero, _)| hero)
+}
+
 pub struct CardDb {
     cards: HashMap<String, Card>,
     /// dbf id → card id (HSReplay refers to cards by dbf id).
     dbf: HashMap<i32, String>,
+    /// Skin id → its hero's id.
+    skins: HashMap<String, String>,
     /// Ids of tavern minions and spells (any mode), for the tier browser.
     pool: Vec<String>,
     /// Ids the card search looks through, one per category and name.
@@ -316,6 +326,10 @@ impl CardDb {
     pub fn parse(bytes: &[u8], path: &Path) -> Result<CardDb> {
         let raw: Vec<RawCard> = serde_json::from_slice(bytes).context("parsing card database")?;
         let dbf: HashMap<i32, String> = raw.iter().filter_map(|r| Some((r.dbf_id?, r.id.clone()))).collect();
+        let skins: HashMap<String, String> = raw
+            .iter()
+            .filter_map(|r| Some((r.id.clone(), dbf.get(&r.battlegrounds_hero_parent_dbf_id?)?.clone())))
+            .collect();
         let cards: HashMap<String, Card> = raw
             .into_iter()
             .map(|r| {
@@ -355,7 +369,7 @@ impl CardDb {
         searchable.sort_by(|a, b| (a.category, &a.name, &a.id).cmp(&(b.category, &b.name, &b.id)));
         searchable.dedup_by(|a, b| a.category == b.category && a.name == b.name);
         let searchable = searchable.into_iter().map(|c| c.id.clone()).collect();
-        Ok(CardDb { cards, dbf, pool, searchable, path: path.to_path_buf() })
+        Ok(CardDb { cards, dbf, skins, pool, searchable, path: path.to_path_buf() })
     }
 
     pub fn path(&self) -> &Path {
@@ -372,6 +386,17 @@ impl CardDb {
 
     pub fn name<'a>(&'a self, id: &'a str) -> &'a str {
         self.get(id).map(|c| c.name.as_str()).filter(|n| !n.is_empty()).unwrap_or(id)
+    }
+
+    /// The hero behind a hero or skin card id: "Soggy Yoggy" is still
+    /// Yogg-Saron. An id nothing maps to is kept as is.
+    pub fn base_hero<'a>(&'a self, id: &'a str) -> &'a str {
+        let base = self.skins.get(id).map(String::as_str).unwrap_or_else(|| base_hero_id(id));
+        if base == id || !self.cards.contains_key(base) {
+            id
+        } else {
+            base
+        }
     }
 
     /// Pool cards of `kind` and `tier` for the current mode.
@@ -504,6 +529,22 @@ mod tests {
         assert_eq!(ids("bat", None), ["B1", "H1", "T1", "R1"]);
         assert_eq!(ids("btlord", Some(Category::Hero)), ["H1"]);
         assert_eq!(ids("", Some(Category::Reward)), ["R1"]);
+    }
+
+    #[test]
+    fn skins_resolve_to_their_hero() {
+        let json = r#"[
+            {"id":"H1","dbfId":10,"name":"Yogg-Saron, Hope's End","type":"Hero","battlegroundsHero":true},
+            {"id":"H1_SKIN_A","dbfId":11,"name":"Soggy Yoggy","type":"Hero","battlegroundsHeroParentDbfId":10},
+            {"id":"H2_SKIN_B","dbfId":12,"name":"Orphan Skin","type":"Hero"},
+            {"id":"H3_SKIN_C","dbfId":13,"name":"Lost Hero Skin","type":"Hero","battlegroundsHeroParentDbfId":999}
+        ]"#;
+        let db = CardDb::parse(json.as_bytes(), Path::new("test")).unwrap();
+        assert_eq!(db.base_hero("H1"), "H1", "a hero is already its own base");
+        assert_eq!(db.base_hero("H1_SKIN_A"), "H1", "the parent dbf id names the hero");
+        assert_eq!(db.base_hero("H1_SKIN_NEW"), "H1", "unseen ids fall back to the id prefix");
+        assert_eq!(db.base_hero("H2_SKIN_B"), "H2_SKIN_B", "nothing maps the skin: keep the id");
+        assert_eq!(db.base_hero("H3_SKIN_C"), "H3_SKIN_C", "the parent is not a known card");
     }
 
     #[test]
