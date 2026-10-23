@@ -111,6 +111,11 @@ fn overlay(cfg: Config, calibrate: bool, logs: Option<PathBuf>) -> Result<()> {
                 Ok(None) => {}
                 Err(e) => log::warn!("could not check log.config: {e:#}"),
             }
+            match paths::ensure_client_config(&hs_dir) {
+                Ok(Some(path)) => log::warn!("disabled log truncation in {} — restart Hearthstone", path.display()),
+                Ok(None) => {}
+                Err(e) => log::warn!("could not check client.config: {e:#}"),
+            }
             hs_dir.join("Logs")
         }
     };

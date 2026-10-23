@@ -47,6 +47,8 @@ struct Atoms {
     net_wm_state_above: u32,
     net_wm_name: u32,
     utf8_string: u32,
+    /// Marks a window for Xalia (gamepad UI helper) to ignore.
+    xalia_ignore: u32,
 }
 
 /// A key press, as far as a text field cares.
@@ -169,6 +171,7 @@ impl X11 {
             net_wm_state_above: intern("_NET_WM_STATE_ABOVE")?,
             net_wm_name: intern("_NET_WM_NAME")?,
             utf8_string: intern("UTF8_STRING")?,
+            xalia_ignore: intern("__xalia_ignore")?,
         };
         let cm_owner = conn
             .get_selection_owner(intern(&format!("_NET_WM_CM_S{screen_num}"))?)?
@@ -249,6 +252,58 @@ impl X11 {
         let _ = self.conn.flush();
     }
 
+    /// Places `win` directly below `sibling` in the stacking order.
+    pub fn restack_below(&self, win: Window, sibling: Window) {
+        let _ = self
+            .conn
+            .configure_window(win, &ConfigureWindowAux::new().sibling(sibling).stack_mode(StackMode::BELOW));
+    }
+
+    /// Demotes every foreign, mapped top-level window that overlaps `rects`
+    /// to just below `bottom`. Wine/Proton (and tools from Steam or GE-Proton
+    /// such as Xalia) restack fullscreen helper windows above the panels at
+    /// arbitrary moments; pinning only the game window left a 1920x1080 ghost
+    /// window floated above the panels inside the game prefix, swallowing
+    /// every panel click. The dwm bar is left alone.
+    pub fn demote_above(&self, rects: &[Rect], ours: &[Window], bottom: Window) {
+        let reply = self.conn.query_tree(self.root).ok().and_then(|c| c.reply().ok());
+        let Some(reply) = reply else { return };
+        self.demote_children(&reply.children, rects, ours, bottom);
+    }
+
+    /// Children are listed bottom of the stack first; everything after
+    /// `bottom` covers it. Only mapped, foreign windows overlapping a rect
+    /// are sent back below it.
+    fn demote_children(&self, children: &[Window], rects: &[Rect], ours: &[Window], bottom: Window) {
+        let Some(bottom_pos) = children.iter().position(|w| *w == bottom) else {
+            return;
+        };
+        for win in &children[bottom_pos + 1..] {
+            if ours.contains(win) {
+                continue;
+            }
+            let attrs = self.conn.get_window_attributes(*win).ok().and_then(|c| c.reply().ok());
+            let Some(attrs) = attrs else {
+                continue;
+            };
+            if attrs.map_state != MapState::VIEWABLE {
+                continue;
+            }
+            if self.wm_class(*win).is_some_and(|c| c.split_whitespace().any(|p| p == "dwm")) {
+                continue;
+            }
+            let geo = self.conn.get_geometry(*win).ok().and_then(|c| c.reply().ok());
+            let pos = self.conn.translate_coordinates(*win, self.root, 0, 0).ok().and_then(|c| c.reply().ok());
+            let (Some(geo), Some(pos)) = (geo, pos) else {
+                continue;
+            };
+            let r = Rect::new(pos.dst_x as i32, pos.dst_y as i32, geo.width as i32, geo.height as i32);
+            if rects.iter().any(|p| p.intersects(&r)) {
+                self.restack_below(*win, bottom);
+            }
+        }
+    }
+
     pub fn poll_event(&self) -> Option<Event> {
         self.conn.poll_for_event().ok().flatten()
     }
@@ -291,11 +346,25 @@ impl X11 {
         Some(String::from_utf8_lossy(&legacy.value).into_owned())
     }
 
-    fn is_hearthstone(&self, win: Window) -> bool {
+    pub fn is_hearthstone(&self, win: Window) -> bool {
         if self.wm_class(win).is_some_and(|c| c.split_whitespace().any(|p| p == "hearthstone.exe")) {
             return true;
         }
         self.wm_name(win).is_some_and(|n| n == "Hearthstone")
+    }
+
+    /// Climbs the window tree from `win` until reaching a direct child of `root`.
+    pub fn top_level_window(&self, mut win: Window) -> Option<Window> {
+        if win == 0 || win == 1 || win == self.root {
+            return None;
+        }
+        loop {
+            let tree = self.conn.query_tree(win).ok()?.reply().ok()?;
+            if tree.parent == self.root || tree.parent == 0 {
+                return Some(win);
+            }
+            win = tree.parent;
+        }
     }
 
     /// Searches top-level windows (and one level of WM frames) for the game.
@@ -325,6 +394,28 @@ impl X11 {
     }
 
     pub fn active_window(&self) -> Option<Window> {
+        // First try X11 input focus: works reliably even when tiling WMs like dwm
+        // do not update _NET_ACTIVE_WINDOW for Wine/Proton windows (due to
+        // neverfocus / WM_TAKE_FOCUS).
+        if let Some(reply) = self.conn.get_input_focus().ok().and_then(|c| c.reply().ok()) {
+            let focus = reply.focus;
+            if focus == 1 {
+                // PointerRoot: focus is with whatever window contains the pointer.
+                if let Some(p) = self.conn.query_pointer(self.root).ok().and_then(|c| c.reply().ok()) {
+                    if p.child != 0 && p.child != self.root {
+                        if let Some(top) = self.top_level_window(p.child) {
+                            return Some(top);
+                        }
+                    }
+                }
+            } else if focus != 0 && focus != self.root {
+                if let Some(top) = self.top_level_window(focus) {
+                    return Some(top);
+                }
+                return Some(focus);
+            }
+        }
+
         let reply = self
             .conn
             .get_property(false, self.root, self.atoms.net_active_window, AtomEnum::WINDOW, 0, 1)
@@ -384,6 +475,11 @@ impl X11 {
             AtomEnum::ATOM,
             &[self.atoms.net_wm_state_above],
         )?;
+        // Xalia (the gamepad UI helper GE-Proton attaches every Wine process)
+        // scans the active window for controls and can grab clicks; it skips
+        // any window with this property (see xalia's __xalia_ignore).
+        self.conn
+            .change_property8(PropMode::REPLACE, win, self.atoms.xalia_ignore, AtomEnum::STRING, b"1")?;
         if !interactive {
             // Empty input region: clicks fall through to the game.
             self.conn.shape_rectangles(shape::SO::SET, shape::SK::INPUT, ClipOrdering::UNSORTED, win, 0, 0, &[])?;

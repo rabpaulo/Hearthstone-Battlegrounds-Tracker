@@ -60,6 +60,8 @@ pub struct UiState {
     pub popup_hover: Option<usize>,
     /// "Latest Games" row of the session panel under the pointer.
     pub info_hover: Option<usize>,
+    /// Pinned "Latest Games" row showing the final-board popup.
+    pub info_pinned: Option<usize>,
     /// Turns per lobby id whose board is toggled away from the default
     /// (only the newest one shown).
     pub board_flips: HashMap<i32, HashSet<i32>>,
@@ -435,6 +437,7 @@ impl Overlay {
                     self.ui.settings_hover = None;
                     self.ui.board_flips.clear();
                     self.ui.info_hover = None;
+                    self.ui.info_pinned = None;
                     self.last_combat = None;
                     self.comps.refresh();
                 }
@@ -880,6 +883,9 @@ impl Overlay {
         if self.ui.info_hover.is_some_and(|i| i >= games.len()) {
             self.ui.info_hover = None;
         }
+        if self.ui.info_pinned.is_some_and(|i| i >= games.len()) {
+            self.ui.info_pinned = None;
+        }
 
         let session = self.history.session(history::now_secs());
         let session_delta: i32 = session
@@ -896,7 +902,7 @@ impl Overlay {
             start_mmr,
             current_mmr,
             games,
-            hover: self.ui.info_hover,
+            hover: self.ui.info_hover.or(self.ui.info_pinned),
             width,
         }
     }
@@ -1194,6 +1200,12 @@ impl App {
             calib: Panel::new(&x, "hsbg-calibration", false)?,
         };
         let lobby_reader = ov.cfg.read_game_memory.then(crate::memory::spawn_reader);
+        if log::log_enabled!(log::Level::Debug) {
+            let w = &panels.windows().iter().map(|w| w.id).collect::<Vec<_>>();
+            // `windows()` order: info, sim/odds, top bar, tiers, comps, search,
+            // settings, calibration, preview, opponent popup, board popup.
+            log::debug!("panel windows in raise order: {w:#010x?}");
+        }
         Ok(App {
             ov,
             x,
@@ -1234,6 +1246,7 @@ impl App {
             }
             self.sync_keyboard();
             self.raise_if_needed();
+            self.pin_game_below_panels();
             self.x.flush();
             if self.ov.game.in_progress() {
                 self.last_in_game = Instant::now();
@@ -1346,7 +1359,7 @@ impl App {
         }
         if self.ov.cfg.hide_when_unfocused {
             if let Some(active) = self.active {
-                if active != 0 && active != gw.id && !self.is_ours(active) {
+                if active != 0 && active != gw.id && !self.is_ours(active) && !self.x.is_hearthstone(active) {
                     return false;
                 }
             }
@@ -1409,6 +1422,7 @@ impl App {
     fn handle_x_events(&mut self) {
         let s = self.layout().map(|l| l.s).unwrap_or(1.0);
         while let Some(ev) = self.x.poll_event() {
+            self.debug_log_event(&ev);
             if !matches!(ev, Event::Expose(_)) {
                 self.dirty = true;
             }
@@ -1418,8 +1432,11 @@ impl App {
                         w.repaint(&self.x);
                     }
                 }
+                Event::ButtonPress(e) if e.event == self.panels.top.win.id && e.detail == 3 => {
+                    self.ov.ui.close_panels();
+                }
                 Event::ButtonPress(e) if e.event == self.panels.top.win.id && e.detail == 1 => {
-                    let hit = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s));
+                    let hit = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s)).or(self.ov.ui.top_hover);
                     let ui = &mut self.ov.ui;
                     match hit {
                         Some(TopHit::Tier(t)) => {
@@ -1465,7 +1482,7 @@ impl App {
                 }
                 Event::ButtonPress(e) if e.event == self.panels.comps.win.id && (e.detail == 1 || e.detail == 3) => {
                     let model = self.panels.comps.model();
-                    let hit = model.and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let hit = model.and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.comp_hover);
                     let clicked = match (model, hit) {
                         (Some(m), Some(CompHit::Item(i))) => match m.item(i) {
                             Some(CompItem::Comp(row)) => Some(row.id),
@@ -1511,7 +1528,7 @@ impl App {
                     self.ov.ui.close_panels();
                 }
                 Event::ButtonPress(e) if e.event == self.panels.search.win.id && e.detail == 1 => {
-                    let hit = self.panels.search.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let hit = self.panels.search.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.search_hover);
                     let ui = &mut self.ov.ui;
                     match hit {
                         Some(SearchHit::Field) => ui.search_focus = true,
@@ -1537,7 +1554,10 @@ impl App {
                             ui.search_scroll = 0.0;
                             ui.search_hover = None;
                         }
-                        Some(SearchHit::Row(_)) | None => {}
+                        Some(SearchHit::Row(i)) => {
+                            ui.search_hover = Some(SearchHit::Row(i));
+                        }
+                        None => {}
                     }
                 }
                 Event::ButtonPress(e) if e.event == self.panels.settings.win.id && e.detail == 3 => {
@@ -1545,7 +1565,7 @@ impl App {
                     self.ov.ui.settings_hover = None;
                 }
                 Event::ButtonPress(e) if e.event == self.panels.settings.win.id && e.detail == 1 => {
-                    let hit = self.panels.settings.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let hit = self.panels.settings.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.settings_hover);
                     match hit {
                         Some(SettingsHit::Theme(i)) => self.pick_theme(i),
                         Some(SettingsHit::Compact(i)) => self.pick_compact_mode(i),
@@ -1574,7 +1594,8 @@ impl App {
                 Event::MappingNotify(_) => self.x.reload_keymap(),
                 Event::ButtonPress(e) if e.event == self.panels.popup.win.id && e.detail == 1 => {
                     let model = self.panels.popup.model();
-                    let hit = model.and_then(|m| Some((m.lobby_id, m.boards.get(m.hit(e.event_x as f32, e.event_y as f32, s)?)?.turn)));
+                    let turn_idx = model.and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.popup_hover);
+                    let hit = model.and_then(|m| Some((m.lobby_id, m.boards.get(turn_idx?)?.turn)));
                     if let Some((lobby_id, turn)) = hit {
                         let flips = self.ov.ui.board_flips.entry(lobby_id).or_default();
                         if !flips.remove(&turn) {
@@ -1586,6 +1607,22 @@ impl App {
                     self.ov.ui.popup_hover = self.panels.popup.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
                 }
                 Event::LeaveNotify(e) if e.event == self.panels.popup.win.id => self.ov.ui.popup_hover = None,
+                Event::ButtonPress(e) if e.event == self.panels.info.win.id && e.detail == 1 => {
+                    let hit = self.panels.info.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.info_hover);
+                    if let Some(i) = hit {
+                        if self.ov.ui.info_pinned == Some(i) {
+                            self.ov.ui.info_pinned = None;
+                            self.ov.ui.info_hover = None;
+                        } else {
+                            self.ov.ui.info_pinned = Some(i);
+                            self.ov.ui.info_hover = Some(i);
+                        }
+                    }
+                }
+                Event::ButtonPress(e) if e.event == self.panels.info.win.id && e.detail == 3 => {
+                    self.ov.ui.info_pinned = None;
+                    self.ov.ui.info_hover = None;
+                }
                 Event::MotionNotify(e) if e.event == self.panels.info.win.id => {
                     self.ov.ui.info_hover = self.panels.info.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
                 }
@@ -1602,26 +1639,34 @@ impl App {
                     self.ov.ui.selected_tier = None;
                 }
                 Event::ButtonPress(e) if e.event == self.panels.tiers.win.id && e.detail == 1 => {
-                    let hit = self.panels.tiers.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s));
+                    let hit = self.panels.tiers.model().and_then(|m| m.hit(e.event_x as f32, e.event_y as f32, s)).or(self.ov.ui.list_hover);
                     let ui = &mut self.ov.ui;
                     match hit {
                         Some(TierHit::LobbyToggle) => {
                             ui.hide_unavailable = !ui.hide_unavailable;
                             ui.scroll = 0.0;
+                            ui.list_hover = None;
                         }
-                        Some(TierHit::FilterBar) => ui.filter_open = !ui.filter_open,
+                        Some(TierHit::FilterBar) => {
+                            ui.filter_open = !ui.filter_open;
+                            ui.list_hover = None;
+                        }
                         Some(TierHit::FilterClear) => {
                             ui.keyword = None;
                             ui.scroll = 0.0;
+                            ui.list_hover = None;
                         }
                         Some(TierHit::Keyword(k)) => {
                             ui.keyword = k;
                             ui.filter_open = false;
                             ui.scroll = 0.0;
+                            ui.list_hover = None;
                         }
-                        Some(TierHit::Row(_)) | None => {}
+                        Some(TierHit::Row(i)) => {
+                            ui.list_hover = Some(TierHit::Row(i));
+                        }
+                        None => {}
                     }
-                    ui.list_hover = None;
                 }
                 Event::MotionNotify(e) if e.event == self.panels.top.win.id => {
                     self.ov.ui.top_hover = self.panels.top.model().and_then(|m| m.hit(e.event_x as f32, s));
@@ -1809,6 +1854,7 @@ impl App {
             p.info.hide(x);
             p.board.hide(x);
             self.ov.ui.info_hover = None;
+            self.ov.ui.info_pinned = None;
         }
         let top_rect = layout.top_bar(top.size(s));
         // The settings button lives in the bar, so it shows whenever a game does.
@@ -1902,6 +1948,32 @@ impl App {
         }
     }
 
+    /// Diagnostic for a silent interface: `RUST_LOG=hsbg_overlay=debug` shows
+    /// which windows clicks land on and where in them, letting hit-testing
+    /// bugs be told apart from a client that grabs the pointer.
+    fn debug_log_event(&self, ev: &Event) {
+        match ev {
+            Event::ButtonPress(e) => log::debug!(
+                "click: win={:#010x} detail={} at ({},{}) root=({},{})",
+                e.event,
+                e.detail,
+                e.event_x,
+                e.event_y,
+                e.root_x,
+                e.root_y
+            ),
+            Event::MotionNotify(e) => log::trace!(
+                "motion: win={:#010x} at ({},{}) root=({},{})",
+                e.event,
+                e.event_x,
+                e.event_y,
+                e.root_x,
+                e.root_y
+            ),
+            _ => {}
+        }
+    }
+
     /// Keeps the panels above the game: the window manager restacks the game
     /// window when it is focused or toggled fullscreen.
     fn raise_if_needed(&mut self) {
@@ -1912,6 +1984,30 @@ impl App {
             self.need_raise = false;
             self.last_raise = Instant::now();
         }
+    }
+
+    /// Pins the game window directly below the bottom-most panel, so it can
+    /// never sit above a panel and take its clicks. dwm (and fullscreen games)
+    /// restack the game above the panels at arbitrary moments — on focus
+    /// changes, Wine/Steam popping helper windows, tag switches — so between
+    /// two periodic raises a fullscreen window covers the panels and every
+    /// click lands on the game instead ("UI not working"). Running on every
+    /// tick shuts that gap: a demotion is undone within one 30 ms tick.
+    ///
+    /// Every other foreign window overlapping a panel gets the same treatment:
+    /// Proton/GE-Proton's Xalia and Valve's Steam Input helper keep
+    /// 1920x1080 ghost windows floating above the game.
+    fn pin_game_below_panels(&mut self) {
+        if !self.panels.windows().iter().any(|w| w.mapped) {
+            return;
+        }
+        // `windows()` is ordered so the first was raised first and therefore
+        // rests at the bottom of the panel stack.
+        let windows = self.panels.windows();
+        let bottom = windows[0];
+        let rects: Vec<Rect> = windows.iter().filter(|w| w.mapped).map(|w| w.rect).collect();
+        let ours: Vec<u32> = windows.iter().map(|w| w.id).collect();
+        self.x.demote_above(&rects, &ours, bottom.id);
     }
 }
 
@@ -2547,5 +2643,39 @@ mod tests {
         assert_eq!(popup_rect.x + popup_rect.w / 2, sim_rect.x + sim_rect.w / 2);
         assert!(layout.popup_max_h(sim_rect) > 0);
         assert!(popup_rect.y + popup_rect.h < hs.h);
+    }
+
+    #[test]
+    fn info_panel_pinning_and_hover() {
+        let mut ov = overlay();
+        let record = GameRecord {
+            id: "1".into(),
+            hero: "HERO_01".into(),
+            place: 1,
+            turn: 10,
+            ended_at: 100,
+            tribes: vec![],
+            rating: Some(6000),
+            mmr_delta: Some(100),
+            board: None,
+        };
+        ov.history.add(record);
+
+        assert_eq!(ov.info_panel(200.0).hover, None);
+
+        // Hovering previews row 0
+        ov.ui.info_hover = Some(0);
+        assert_eq!(ov.info_panel(200.0).hover, Some(0));
+
+        // Pinning keeps row 0 even when unhovered
+        ov.ui.info_pinned = Some(0);
+        ov.ui.info_hover = None;
+        assert_eq!(ov.info_panel(200.0).hover, Some(0));
+
+        // Resetting on game start clears both
+        ov.handle_events(vec![GameEvent::GameStarted], false);
+        assert_eq!(ov.ui.info_hover, None);
+        assert_eq!(ov.ui.info_pinned, None);
+        assert_eq!(ov.info_panel(200.0).hover, None);
     }
 }

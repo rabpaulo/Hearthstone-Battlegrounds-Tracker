@@ -188,6 +188,33 @@ tabuleiro do oponente com gemas de ataque/vida e letras de palavra-chave, e
 sem pré-visualização no hover. No modo texto o overlay não baixa imagem
 alguma. Também dá para trocar ao vivo pelo botão de ajustes.
 
+## Solução de problemas
+
+### "A interface não reage a cliques"
+
+Nesta ordem:
+
+1. **A interface está visível?** Com `hide_when_unfocused = true` (padrão),
+   os painéis somem quando o jogo não está em foco — sem painel não há
+   clique. Se a interface some ao trocar de janela, não é bug: é essa opção.
+2. **Outra janela cobriu os painéis.** O dwm (e o Wine/Proton) reordenam a
+   pilha em momentos arbitrários — mudanças de foco, retomadas de tela
+   cheia, janelas auxiliares que o Steam ou o xalia (o helper de gamepad da
+   GE-Proton, `xalia.exe`) criam por cima do jogo. O overlay rebaixa
+   qualquer janela estranha que cubra um painel a cada tick (30 ms) e marca
+   suas janelas com `__xalia_ignore` para o xalia não interagir com elas.
+   Versões antigas da GE-Proton também podem: jogue com
+   `PROTON_USE_XALIA=0` (nas opções de inicialização) e teste de novo.
+3. **Debug de cliques.** Rode `RUST_LOG=hsbg_overlay=debug hsbg-overlay`.
+   Cada clique chega como `click: win=0x... detail=1 at (x,y)`. Com a
+   lista de painéis (`panel windows in raise order: ...`, no início do log)
+   dá para dizer:
+   - cliques com `win=` de um painel e o painel não reage → copie a linha e
+     abra um bug;
+   - **nenhuma** linha `click:` enquanto clica num painel → outro cliente
+     está capturando o ponteiro (xalia/Hearthstone/Steam). Sem controle
+     conectado, `PROTON_USE_XALIA=0` resolve; reporte se não.
+
 ## Ferramentas de diagnóstico
 
 ```sh

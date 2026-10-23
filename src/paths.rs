@@ -102,6 +102,95 @@ pub fn ensure_log_config(hs_dir: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(path.clone()))
 }
 
+const CLIENT_CONFIG_SECTION: &str = "[Log]\nFileSizeLimit.Int = -1\n";
+
+/// Ensures `client.config` in the Hearthstone root folder disables the default
+/// 10MB log file size limit (`FileSizeLimit.Int = -1`). Without this, Hearthstone
+/// stops logging to `Power.log` mid-session once 10000KB is reached.
+pub fn ensure_client_config(hs_dir: &Path) -> Result<Option<PathBuf>> {
+    let path = hs_dir.join("client.config");
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    let (updated, changed) = with_file_size_limit(&current);
+    if !changed {
+        return Ok(None);
+    }
+    std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Some(path))
+}
+
+pub fn with_file_size_limit(config: &str) -> (String, bool) {
+    let mut out = String::new();
+    let mut in_log = false;
+    let mut has_log_section = false;
+    let mut has_limit = false;
+
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            if trimmed.eq_ignore_ascii_case("[Log]") {
+                in_log = true;
+                has_log_section = true;
+                out.push_str("[Log]\n");
+                continue;
+            } else if trimmed.eq_ignore_ascii_case("[Logging]") {
+                // Migrate legacy / incorrect [Logging] to [Log]
+                in_log = true;
+                has_log_section = true;
+                out.push_str("[Log]\n");
+                continue;
+            } else {
+                in_log = false;
+            }
+        } else if in_log {
+            if let Some((k, v)) = trimmed.split_once('=') {
+                if k.trim().eq_ignore_ascii_case("FileSizeLimit.Int") {
+                    has_limit = true;
+                    if v.trim() == "-1" {
+                        out.push_str("FileSizeLimit.Int = -1\n");
+                        continue;
+                    }
+                    out.push_str("FileSizeLimit.Int = -1\n");
+                    continue;
+                }
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+
+    if has_limit {
+        let changed = out != config;
+        (out, changed)
+    } else if has_log_section {
+        // Append FileSizeLimit.Int to the existing [Log] section
+        let mut final_out = String::new();
+        let mut in_target = false;
+        let mut inserted = false;
+        for line in out.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                if in_target && !inserted {
+                    final_out.push_str("FileSizeLimit.Int = -1\n");
+                    inserted = true;
+                }
+                in_target = trimmed.eq_ignore_ascii_case("[Log]");
+            }
+            final_out.push_str(line);
+            final_out.push('\n');
+        }
+        if !inserted {
+            final_out.push_str("FileSizeLimit.Int = -1\n");
+        }
+        (final_out, true)
+    } else {
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(CLIENT_CONFIG_SECTION);
+        (out, true)
+    }
+}
+
 /// Replaces (or appends) the `[Power]` section; other sections are kept.
 fn with_power_section(config: &str) -> (String, bool) {
     let mut out = String::new();
@@ -155,5 +244,36 @@ mod tests {
         assert!(changed);
         assert!(out.starts_with("[Arena]\nLogLevel=1\n[LoadingScreen]\nLogLevel=1\n"));
         assert!(out.ends_with(POWER_SECTION));
+    }
+
+    #[test]
+    fn adds_file_size_limit_when_empty() {
+        let (out, changed) = with_file_size_limit("");
+        assert!(changed);
+        assert_eq!(out, CLIENT_CONFIG_SECTION);
+    }
+
+    #[test]
+    fn keeps_existing_file_size_limit() {
+        let cfg = "[Log]\nFileSizeLimit.Int = -1\n";
+        let (out, changed) = with_file_size_limit(cfg);
+        assert!(!changed);
+        assert_eq!(out, cfg);
+    }
+
+    #[test]
+    fn updates_different_file_size_limit() {
+        let cfg = "[Log]\nFileSizeLimit.Int = 10000\n";
+        let (out, changed) = with_file_size_limit(cfg);
+        assert!(changed);
+        assert_eq!(out, "[Log]\nFileSizeLimit.Int = -1\n");
+    }
+
+    #[test]
+    fn migrates_logging_to_log() {
+        let cfg = "[Logging]\nFileSizeLimit.Int = -1\n";
+        let (out, changed) = with_file_size_limit(cfg);
+        assert!(changed);
+        assert_eq!(out, "[Log]\nFileSizeLimit.Int = -1\n");
     }
 }

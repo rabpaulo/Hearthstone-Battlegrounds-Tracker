@@ -216,6 +216,7 @@ fn save_line(path: &Path, line: &str) -> Result<()> {
 /// Sets a top-level `key = "value"` line, leaving comments and the other
 /// lines as they are. A missing key is inserted before the first `[section]`,
 /// or appended when the file has none.
+#[cfg_attr(not(test), allow(dead_code))]
 fn set_top_level_key(config: &str, key: &str, value: &str) -> String {
     set_top_level_line(config, &format!("{key} = \"{value}\""))
 }
