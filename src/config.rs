@@ -30,6 +30,7 @@ pub struct Config {
     pub show_simulation: bool,
     pub show_tiers: bool,
     pub show_session: bool,
+    pub show_counters: bool,
     pub show_opponent_boards: bool,
     /// "Comps" button: HSReplay's meta tier list and comp guides.
     pub show_comps: bool,
@@ -150,6 +151,7 @@ impl Default for Config {
             show_simulation: true,
             show_tiers: true,
             show_session: true,
+            show_counters: true,
             show_opponent_boards: true,
             show_comps: true,
             show_search: true,

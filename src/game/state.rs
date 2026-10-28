@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 
 use super::tags::{self, card_type, zone};
+use crate::cards::Tribe;
 use crate::logfile::power::{parse_line, EntityRef, PowerLine};
 
 #[derive(Debug, Clone, Default)]
@@ -32,6 +33,24 @@ impl Entity {
     pub fn tag(&self, name: &str) -> i32 {
         self.tags.get(name).copied().unwrap_or(0)
     }
+
+    pub fn tag_or(&self, name: &str, alt_numeric: i32) -> i32 {
+        if let Some(&v) = self.tags.get(name) {
+            return v;
+        }
+        let alt = alt_numeric.to_string();
+        self.tags.get(&alt).copied().unwrap_or(0)
+    }
+}
+
+/// An active Battlegrounds counter/spell (e.g. Blood Gems +1/+1, Free Rolls 25).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterItem {
+    pub id: String,
+    pub card_id: String,
+    pub label: String,
+    pub value: String,
+    pub sort_order: i32,
 }
 
 /// An entity as shipped to the simulator: card id plus every numeric tag,
@@ -81,6 +100,8 @@ pub struct CombatSnapshot {
     pub turn: i32,
     pub players_alive: i32,
     pub anomalies: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub damage_cap: Option<i32>,
     pub player: Side,
     pub opponent: Side,
 }
@@ -364,10 +385,12 @@ impl Game {
             .filter(|e| e.tag(tags::CARDTYPE) == card_type::BATTLEGROUND_ANOMALY && e.tag(tags::ZONE) == zone::PLAY)
             .map(|e| e.card_id.clone())
             .collect();
+        let damage_cap = self.damage_cap();
         let snapshot = CombatSnapshot {
             turn,
             players_alive: self.leaderboard().iter().filter(|p| p.health > 0).count() as i32,
             anomalies,
+            damage_cap,
             player,
             opponent,
         };
@@ -454,6 +477,45 @@ impl Game {
     pub fn in_combat(&self) -> bool {
         let t = self.raw_turn();
         t > 0 && t % 2 == 0
+    }
+
+    /// Current combat damage cap (e.g. 5, 10, 15), or `None` if uncapped.
+    pub fn damage_cap(&self) -> Option<i32> {
+        if !self.is_battlegrounds() {
+            return None;
+        }
+        let ge = self.entities.get(&self.game_entity);
+        if let Some(ge) = ge {
+            let has_enabled_tag = ge.tags.contains_key(tags::BACON_COMBAT_DAMAGE_CAP_ENABLED)
+                || ge.tags.contains_key("3403");
+            if has_enabled_tag {
+                let enabled = ge.tag_or(tags::BACON_COMBAT_DAMAGE_CAP_ENABLED, 3403);
+                if enabled == 0 {
+                    return None;
+                }
+                let cap = ge.tag_or(tags::BACON_COMBAT_DAMAGE_CAP, 2089);
+                if cap > 2 {
+                    return Some(cap);
+                }
+            }
+        }
+        let lb = self.leaderboard();
+        let total_players = lb.len();
+        let players_alive = lb.iter().filter(|p| p.health > 0).count();
+        if total_players >= 8 && players_alive <= 4 {
+            return None;
+        }
+        if self.is_duos() {
+            return Some(15);
+        }
+        let turn = self.turn();
+        if turn < 4 {
+            Some(5)
+        } else if turn < 8 {
+            Some(10)
+        } else {
+            Some(15)
+        }
     }
 
     fn dummy_player(&self) -> Option<(i32, i32)> {
@@ -543,6 +605,203 @@ impl Game {
             .collect();
         list.sort_by_key(|p| (p.place, p.lobby_id));
         list
+    }
+
+    /// Active Battlegrounds counters and spells (Blood Gems, Free Rolls, etc.).
+    pub fn counters(&self, lobby_tribes: &[Tribe]) -> Vec<CounterItem> {
+        let (Some((local_pid, local_pe)), _hero) = (self.local_player(), self.local_hero()) else {
+            return Vec::new();
+        };
+        let pe = match self.entities.get(&local_pe) {
+            Some(e) => e,
+            None => return Vec::new(),
+        };
+        let hero_id = pe.tag(tags::HERO_ENTITY);
+        let mut counters = Vec::new();
+
+        // 1. Blood Gems (+X / +Y)
+        let mut blood_gem_atk = pe.tag_or(tags::BACON_BLOODGEMBUFFATKVALUE, 1844);
+        let mut blood_gem_hp = pe.tag_or(tags::BACON_BLOODGEMBUFFHEALTHVALUE, 2827);
+
+        for e in self.entities.values() {
+            if (e.tag(tags::CONTROLLER) == local_pid || e.tag(tags::ATTACHED) == local_pe || e.tag(tags::ATTACHED) == hero_id)
+                && e.card_id == "BG26_159pe"
+            {
+                let a = e.tag_or(tags::TAG_SCRIPT_DATA_NUM_1, 2);
+                let h = e.tag_or(tags::TAG_SCRIPT_DATA_NUM_2, 3);
+                blood_gem_atk = blood_gem_atk.max(a);
+                blood_gem_hp = blood_gem_hp.max(h);
+            }
+        }
+
+        let has_quilboar_lobby = lobby_tribes.contains(&Tribe::Quilboar);
+        let has_blood_gem_entity = self.entities.values().any(|e| {
+            e.tag(tags::CONTROLLER) == local_pid
+                && (e.tag(tags::ZONE) == zone::PLAY || e.tag(tags::ZONE) == zone::HAND)
+                && (e.card_id.starts_with("BG20_GEM") || e.card_id == "BGS_1G")
+        });
+
+        if blood_gem_atk > 0 || blood_gem_hp > 0 || has_quilboar_lobby || has_blood_gem_entity {
+            let total_atk = 1 + blood_gem_atk;
+            let total_hp = 1 + blood_gem_hp;
+            counters.push(CounterItem {
+                id: "blood_gem".into(),
+                card_id: "BG20_GEM".into(),
+                label: "Blood Gem".into(),
+                value: format!("+{total_atk} / +{total_hp}"),
+                sort_order: 1,
+            });
+        }
+
+        // 2. Free Rolls
+        let mut free_refreshes = pe.tag_or(tags::BACON_FREE_REFRESH_COUNT, 4536);
+        for e in self.entities.values() {
+            if (e.tag(tags::CONTROLLER) == local_pid || e.tag(tags::ATTACHED) == local_pe || e.tag(tags::ATTACHED) == hero_id)
+                && e.tag(tags::ZONE) != zone::REMOVEDFROMGAME
+            {
+                let count = e.tag_or(tags::BACON_FREE_REFRESH_COUNT, 4536);
+                if count > 0 {
+                    free_refreshes = free_refreshes.max(count);
+                }
+                let hero_count = e.tag_or("BACON_NUMBER_HERO_REFRESH_AVAILABLE", 2452);
+                if hero_count > 0 {
+                    free_refreshes = free_refreshes.max(hero_count);
+                }
+            }
+        }
+        if free_refreshes > 0 {
+            counters.push(CounterItem {
+                id: "free_refresh".into(),
+                card_id: "BGS_116".into(),
+                label: "Free Rolls".into(),
+                value: format!("{free_refreshes}"),
+                sort_order: 2,
+            });
+        }
+
+        // 3. Tavern Spells Buff
+        let tspell_atk = pe.tag_or(tags::TAVERN_SPELL_ATTACK_INCREASE, 3989);
+        let tspell_hp = pe.tag_or(tags::TAVERN_SPELL_HEALTH_INCREASE, 3990);
+        if tspell_atk > 0 || tspell_hp > 0 {
+            counters.push(CounterItem {
+                id: "tavern_spells".into(),
+                card_id: "BG28_168".into(),
+                label: "Tavern Spells".into(),
+                value: format!("+{tspell_atk} / +{tspell_hp}"),
+                sort_order: 3,
+            });
+        }
+
+        // 4. Extra Gold Next Turn
+        let mut extra_gold = pe.tag_or(tags::BACON_PLAYER_EXTRA_GOLD_NEXT_TURN, 4286);
+        for e in self.entities.values() {
+            if e.tag(tags::CONTROLLER) == local_pid && e.tag(tags::ZONE) == zone::PLAY {
+                if e.card_id == "BG26_147" {
+                    extra_gold += 1;
+                } else if e.card_id == "BG26_147_G" {
+                    extra_gold += 2;
+                }
+            }
+        }
+        if extra_gold > 0 {
+            counters.push(CounterItem {
+                id: "extra_gold".into(),
+                card_id: "BG28_800".into(),
+                label: "Next Turn Gold".into(),
+                value: format!("+{extra_gold}"),
+                sort_order: 4,
+            });
+        }
+
+        // 5. Spells Played for Nagas
+        let spells_played = pe.tag_or("3809", 3809);
+        let has_naga_synergy = self.entities.values().any(|e| {
+            e.tag(tags::CONTROLLER) == local_pid
+                && e.tag(tags::ZONE) == zone::PLAY
+                && (e.card_id == "BG31_924" || e.card_id == "BG31_924_G" || e.card_id == "BG28_600")
+        });
+        if spells_played > 0 && (has_naga_synergy || spells_played > 2) {
+            let procs = 1 + spells_played / 3;
+            let progress = spells_played % 3;
+            counters.push(CounterItem {
+                id: "naga_spells".into(),
+                card_id: "BG31_924".into(),
+                label: "Spells Played".into(),
+                value: format!("{procs} ({progress}/3)"),
+                sort_order: 5,
+            });
+        }
+
+        // 6. Undead Army
+        let mut undead_atk = 0;
+        let mut undead_hp = 0;
+        for e in self.entities.values() {
+            if (e.tag(tags::CONTROLLER) == local_pid || e.tag(tags::ATTACHED) == local_pe)
+                && (e.card_id == "BG25_011pe" || e.card_id == "BG_ShopBuff_Undead" || e.card_id.contains("UndeadBonus"))
+            {
+                undead_atk = undead_atk.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_1, 2));
+                undead_hp = undead_hp.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_2, 3));
+            }
+        }
+        if undead_atk > 0 || undead_hp > 0 {
+            let val_str = if undead_hp > 0 {
+                format!("+{undead_atk} / +{undead_hp}")
+            } else {
+                format!("+{undead_atk}")
+            };
+            counters.push(CounterItem {
+                id: "undead_army".into(),
+                card_id: "BG25_011".into(),
+                label: "Undead Army".into(),
+                value: val_str,
+                sort_order: 6,
+            });
+        }
+
+        // 7. Beetle Army
+        let mut beetle_atk = 0;
+        let mut beetle_hp = 0;
+        for e in self.entities.values() {
+            if (e.tag(tags::CONTROLLER) == local_pid || e.tag(tags::ATTACHED) == local_pe)
+                && (e.card_id == "BG31_808pe" || e.card_id.contains("BeetleArmy"))
+            {
+                beetle_atk = beetle_atk.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_1, 2));
+                beetle_hp = beetle_hp.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_2, 3));
+            }
+        }
+        if beetle_atk > 0 || beetle_hp > 0 {
+            counters.push(CounterItem {
+                id: "beetles".into(),
+                card_id: "BG28_603t".into(),
+                label: "Beetles Army".into(),
+                value: format!("{} / {}", 1 + beetle_atk, 1 + beetle_hp),
+                sort_order: 7,
+            });
+        }
+
+        // 8. Elemental Tavern Buff
+        let mut elem_atk = 0;
+        let mut elem_hp = 0;
+        for e in self.entities.values() {
+            if (e.tag(tags::CONTROLLER) == local_pid || e.tag(tags::ATTACHED) == local_pe)
+                && (e.card_id == "BGS_104pe" || e.card_id == "BG30_MagicItem_544pe" || e.card_id == "BG34_855pe" || e.card_id.contains("ElementalShopBuff"))
+            {
+                elem_atk = elem_atk.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_1, 2));
+                elem_hp = elem_hp.max(e.tag_or(tags::TAG_SCRIPT_DATA_NUM_2, 3));
+            }
+        }
+        if elem_atk > 0 || elem_hp > 0 {
+            counters.push(CounterItem {
+                id: "elemental_tavern".into(),
+                card_id: "BG_EX1_575".into(),
+                label: "Elemental Shop".into(),
+                value: format!("+{elem_atk} / +{elem_hp}"),
+                sort_order: 8,
+            });
+        }
+
+        counters.sort_by_key(|c| c.sort_order);
+        counters
     }
 }
 
@@ -676,6 +935,7 @@ mod tests {
         let events = g.take_events();
         let [GameEvent::Combat(snap)] = events.as_slice() else { panic!("{events:?}") };
         assert_eq!(snap.turn, 1);
+        assert_eq!(snap.damage_cap, Some(5));
         assert_eq!(snap.player.lobby_id, 3);
         assert_eq!(snap.opponent.lobby_id, 5);
         assert_eq!(snap.opponent.hero.as_ref().unwrap().card_id, "HERO_B");
@@ -687,6 +947,36 @@ mod tests {
         // Combat minions are not shop offers.
         assert_eq!(g.shop_cards().len(), 1);
         assert_eq!(g.seen_board(5).unwrap().side.board.len(), 1);
+    }
+
+    #[test]
+    fn damage_cap_progression_and_removal() {
+        let mut g = base_game();
+        // Turn 1..3 defaults to 5
+        assert_eq!(g.damage_cap(), Some(5));
+
+        // Turn 4..7 defaults to 10
+        feed(&mut g, &["    TAG_CHANGE Entity=GameEntity tag=TURN value=7 "]);
+        assert_eq!(g.turn(), 4);
+        assert_eq!(g.damage_cap(), Some(10));
+
+        // Turn 8+ defaults to 15
+        feed(&mut g, &["    TAG_CHANGE Entity=GameEntity tag=TURN value=15 "]);
+        assert_eq!(g.turn(), 8);
+        assert_eq!(g.damage_cap(), Some(15));
+
+        // Explicit tags on GameEntity
+        feed(&mut g, &[
+            "    TAG_CHANGE Entity=GameEntity tag=BACON_COMBAT_DAMAGE_CAP value=10 ",
+            "    TAG_CHANGE Entity=GameEntity tag=BACON_COMBAT_DAMAGE_CAP_ENABLED value=1 ",
+        ]);
+        assert_eq!(g.damage_cap(), Some(10));
+
+        // Disabled damage cap (e.g. top 4 reached)
+        feed(&mut g, &[
+            "    TAG_CHANGE Entity=GameEntity tag=BACON_COMBAT_DAMAGE_CAP_ENABLED value=0 ",
+        ]);
+        assert_eq!(g.damage_cap(), None);
     }
 
     #[test]
@@ -705,5 +995,120 @@ mod tests {
         assert_eq!((r.place, r.hero_card_id.as_str()), (4, "HERO_A"));
         assert!(r.game_id.starts_with("test#"));
         assert!(!g.in_progress());
+    }
+
+    #[test]
+    fn counters_tracks_blood_gems_and_free_rolls() {
+        let mut g = base_game();
+        // With no Quilboar and no buffs, counters are empty.
+        assert!(g.counters(&[Tribe::Beast, Tribe::Mech]).is_empty());
+
+        // Quilboar in lobby shows base +1 / +1 Blood Gems.
+        let c = g.counters(&[Tribe::Quilboar, Tribe::Beast]);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].id, "blood_gem");
+        assert_eq!(c[0].value, "+1 / +1");
+
+        // Player receives Blood Gem buffs (+2 atk, +4 hp) -> +3 / +5
+        feed(
+            &mut g,
+            &[
+                "    TAG_CHANGE Entity=Me#1 tag=BACON_BLOODGEMBUFFATKVALUE value=2 ",
+                "    TAG_CHANGE Entity=Me#1 tag=BACON_BLOODGEMBUFFHEALTHVALUE value=4 ",
+            ],
+        );
+        let c = g.counters(&[Tribe::Quilboar]);
+        assert_eq!(c[0].value, "+3 / +5");
+
+        // Friendly minion has blood gems played on it with huge stats (+100/+100).
+        // The Blood Gem counter must NOT use minion enchantments; it must show what each blood gem gives (+3/+5).
+        feed(
+            &mut g,
+            &[
+                "FULL_ENTITY - Creating ID=60 CardID=BG20_GEMe",
+                "    tag=CONTROLLER value=8",
+                "    tag=CARDTYPE value=ENCHANTMENT",
+                "    tag=ATTACHED value=10",
+                "    tag=ZONE value=PLAY",
+                "    tag=TAG_SCRIPT_DATA_NUM_1 value=100",
+                "    tag=TAG_SCRIPT_DATA_NUM_2 value=100",
+                "FULL_ENTITY - Creating ID=61 CardID=BG20_GEMe2",
+                "    tag=CONTROLLER value=8",
+                "    tag=CARDTYPE value=ENCHANTMENT",
+                "    tag=ATTACHED value=10",
+                "    tag=ZONE value=PLAY",
+                "    tag=TAG_SCRIPT_DATA_NUM_1 value=100",
+                "    tag=TAG_SCRIPT_DATA_NUM_2 value=100",
+            ],
+        );
+        let c = g.counters(&[Tribe::Quilboar]);
+        assert_eq!(c[0].value, "+3 / +5", "must track what each blood gem gives, not minion cumulative stats");
+
+        // Player enchantment BG26_159pe (Blood Gem Player Enchant) buffs blood gems (+8/+8 -> +9/+9)
+        feed(
+            &mut g,
+            &[
+                "FULL_ENTITY - Creating ID=70 CardID=BG26_159pe",
+                "    tag=CONTROLLER value=8",
+                "    tag=CARDTYPE value=ENCHANTMENT",
+                "    tag=ATTACHED value=2",
+                "    tag=ZONE value=PLAY",
+                "    tag=TAG_SCRIPT_DATA_NUM_1 value=8",
+                "    tag=TAG_SCRIPT_DATA_NUM_2 value=8",
+            ],
+        );
+        let c = g.counters(&[Tribe::Quilboar]);
+        assert_eq!(c[0].value, "+9 / +9", "base 1/1 + player buff 8/8 gives +9/+9");
+
+        // Player receives 25 Free Rolls via Bacon_Free_Refresh_Player_Ench
+        feed(
+            &mut g,
+            &[
+                "FULL_ENTITY - Creating ID=50 CardID=Bacon_Free_Refresh_Player_Ench",
+                "    tag=CONTROLLER value=8",
+                "    tag=CARDTYPE value=ENCHANTMENT",
+                "    tag=ATTACHED value=2",
+                "    tag=ZONE value=PLAY",
+                "    tag=BACON_FREE_REFRESH_COUNT value=25",
+            ],
+        );
+        let c = g.counters(&[Tribe::Quilboar]);
+        assert_eq!(c.len(), 2);
+        let free = c.iter().find(|x| x.id == "free_refresh").unwrap();
+        assert_eq!(free.label, "Free Rolls");
+        assert_eq!(free.value, "25");
+
+        // When free rolls are spent down to 0, it disappears from counters.
+        feed(&mut g, &["    TAG_CHANGE Entity=50 tag=BACON_FREE_REFRESH_COUNT value=0 "]);
+        let c = g.counters(&[Tribe::Quilboar]);
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].id, "blood_gem");
+
+        // Tavern spell buffs
+        feed(
+            &mut g,
+            &[
+                "    TAG_CHANGE Entity=Me#1 tag=TAVERN_SPELL_ATTACK_INCREASE value=1 ",
+                "    TAG_CHANGE Entity=Me#1 tag=TAVERN_SPELL_HEALTH_INCREASE value=2 ",
+            ],
+        );
+        let c = g.counters(&[Tribe::Quilboar]);
+        let tspell = c.iter().find(|x| x.id == "tavern_spells").unwrap();
+        assert_eq!(tspell.label, "Tavern Spells");
+        assert_eq!(tspell.value, "+1 / +2");
+    }
+
+    #[test]
+    fn test_counters_from_real_log() {
+        let path = "/home/paulo/Games/battlenet/drive_c/Program Files (x86)/Hearthstone/Logs/Hearthstone_2026_10_26_19_29_35/Power.log";
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let mut g = Game::new();
+            for line in text.lines() {
+                g.process(line);
+            }
+            let c = g.counters(&[Tribe::Quilboar]);
+            let bg = c.iter().find(|x| x.id == "blood_gem").expect("blood gem counter");
+            assert_eq!(bg.value, "+15 / +17");
+        }
     }
 }

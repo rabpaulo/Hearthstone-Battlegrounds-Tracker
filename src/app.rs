@@ -18,7 +18,7 @@ use crate::memory::{LobbyRaces, MemoryEvent};
 use crate::sim::{Odds, SimClient, SimEvent};
 use crate::ui::draw::{Canvas, Fonts, Rgba};
 use crate::ui::panels::{
-    self, BoardView, CardPreview, Calibration, CompHit, CompItem, CompPanel, CompRow, Ctx, FinalBoardPopup, GameRow, InfoPanel, MinionView,
+    self, BoardView, Calibration, CardPreview, CompHit, CompItem, CompPanel, CompRow, Ctx, FinalBoardPopup, GameRow, InfoHit, InfoPanel, MinionView,
     OddsView, OpponentPopup, SearchHit, SearchPanel, SearchRow, SettingsHit, SettingsPanel, SimPanel, TierHit, TierList, TierRow,
     TierSection, TopBar, TopHit,
 };
@@ -38,6 +38,9 @@ pub struct SimView {
     pub odds: Option<Odds>,
     pub running: bool,
     pub error: Option<String>,
+    pub damage_cap: Option<i32>,
+    pub player_hp: i32,
+    pub opponent_hp: i32,
 }
 
 #[derive(Debug, Default)]
@@ -58,10 +61,10 @@ pub struct UiState {
     pub slot_hover: Option<usize>,
     /// Turn chip of the opponent popup under the pointer.
     pub popup_hover: Option<usize>,
-    /// "Latest Games" row of the session panel under the pointer.
-    pub info_hover: Option<usize>,
-    /// Pinned "Latest Games" row showing the final-board popup.
-    pub info_pinned: Option<usize>,
+    /// Row of the session/counters panel under the pointer.
+    pub info_hover: Option<InfoHit>,
+    /// Pinned row showing its popup / preview.
+    pub info_pinned: Option<InfoHit>,
     /// Turns per lobby id whose board is toggled away from the default
     /// (only the newest one shown).
     pub board_flips: HashMap<i32, HashSet<i32>>,
@@ -442,7 +445,25 @@ impl Overlay {
                     self.comps.refresh();
                 }
                 GameEvent::Combat(snap) => {
-                    self.sim_view = SimView { turn: snap.turn, ..SimView::default() };
+                    let player_hp = snap
+                        .player
+                        .hero
+                        .as_ref()
+                        .map(|h| (h.tag(tags::HEALTH) - h.tag(tags::DAMAGE)).max(0) + h.tag(tags::ARMOR))
+                        .unwrap_or(0);
+                    let opponent_hp = snap
+                        .opponent
+                        .hero
+                        .as_ref()
+                        .map(|h| (h.tag(tags::HEALTH) - h.tag(tags::DAMAGE)).max(0) + h.tag(tags::ARMOR))
+                        .unwrap_or(0);
+                    self.sim_view = SimView {
+                        turn: snap.turn,
+                        damage_cap: snap.damage_cap,
+                        player_hp,
+                        opponent_hp,
+                        ..SimView::default()
+                    };
                     if self.game.is_duos() {
                         self.sim_view.error = Some("Odds are not available in Duos".into());
                     } else if !catchup {
@@ -496,8 +517,26 @@ impl Overlay {
 
     pub fn on_sim_event(&mut self, ev: SimEvent) {
         match ev {
-            SimEvent::Partial(o) => self.sim_view.odds = Some(o),
-            SimEvent::Done(o) => {
+            SimEvent::Partial(mut o) => {
+                if let Some(cap) = self.sim_view.damage_cap {
+                    if self.sim_view.opponent_hp > cap {
+                        o.won_lethal = 0.0;
+                    }
+                    if self.sim_view.player_hp > cap {
+                        o.lost_lethal = 0.0;
+                    }
+                }
+                self.sim_view.odds = Some(o);
+            }
+            SimEvent::Done(mut o) => {
+                if let Some(cap) = self.sim_view.damage_cap {
+                    if self.sim_view.opponent_hp > cap {
+                        o.won_lethal = 0.0;
+                    }
+                    if self.sim_view.player_hp > cap {
+                        o.lost_lethal = 0.0;
+                    }
+                }
                 self.sim_view.odds = Some(o);
                 self.sim_view.running = false;
             }
@@ -518,6 +557,7 @@ impl Overlay {
     pub fn top_bar(&self) -> TopBar {
         TopBar {
             turn: self.game.turn(),
+            damage_cap: self.game.damage_cap(),
             tavern_tier: self.game.tavern_tier(),
             max_tier: if self.cfg.show_tiers { self.game.max_tavern_tier() } else { 0 },
             selected: self.ui.selected_tier,
@@ -809,22 +849,46 @@ impl Overlay {
     pub fn sim_panel(&self) -> SimPanel {
         let v = &self.sim_view;
         let in_combat = self.game.in_combat() && v.turn == self.game.turn();
+        let cap = if in_combat { self.game.damage_cap() } else { v.damage_cap };
         let title = if v.turn == 0 {
             "Odds appear when combat starts".to_string()
         } else if in_combat {
-            "Current Combat".to_string()
+            match cap {
+                Some(c) => format!("Current Combat · Cap {c}"),
+                None => "Current Combat · No Cap".to_string(),
+            }
         } else {
-            format!("Last Combat · Turn {}", v.turn)
+            match cap {
+                Some(c) => format!("Last Combat · Turn {} · Cap {c}", v.turn),
+                None => format!("Last Combat · Turn {}", v.turn),
+            }
         };
+        let won_lethal = v.odds.and_then(|o| {
+            if let Some(c) = cap {
+                if v.opponent_hp > c {
+                    return None;
+                }
+            }
+            Some(o.won_lethal)
+        });
+        let lost_lethal = v.odds.and_then(|o| {
+            if let Some(c) = cap {
+                if v.player_hp > c {
+                    return None;
+                }
+            }
+            Some(o.lost_lethal)
+        });
         SimPanel {
             title,
             odds: v.odds.map(|o| OddsView {
-                won_lethal: o.won_lethal,
+                won_lethal,
                 won: o.won,
                 tied: o.tied,
                 lost: o.lost,
-                lost_lethal: o.lost_lethal,
+                lost_lethal,
             }),
+            damage_cap: cap,
             dim: !in_combat,
             running: v.running,
             note: v.error.clone(),
@@ -879,12 +943,29 @@ impl Overlay {
                 mmr_delta: g.mmr_delta.or_else(|| Some(placement_delta(g.place))),
             });
         }
-        // Games rarely leave the list, but a stale hover then sticks.
-        if self.ui.info_hover.is_some_and(|i| i >= games.len()) {
-            self.ui.info_hover = None;
+
+        let counters = if self.cfg.show_counters {
+            let tribes = self.lobby_tribes().tribes;
+            let list = self.game.counters(&tribes);
+            for item in &list {
+                self.images.prefetch(ImageKind::Tile, &item.card_id);
+                self.images.prefetch(ImageKind::Render, &item.card_id);
+            }
+            list
+        } else {
+            Vec::new()
+        };
+
+        // Games/counters rarely leave the list, but a stale hover then sticks.
+        match self.ui.info_hover {
+            Some(InfoHit::Game(i)) if i >= games.len() => self.ui.info_hover = None,
+            Some(InfoHit::Counter(i)) if i >= counters.len() => self.ui.info_hover = None,
+            _ => {}
         }
-        if self.ui.info_pinned.is_some_and(|i| i >= games.len()) {
-            self.ui.info_pinned = None;
+        match self.ui.info_pinned {
+            Some(InfoHit::Game(i)) if i >= games.len() => self.ui.info_pinned = None,
+            Some(InfoHit::Counter(i)) if i >= counters.len() => self.ui.info_pinned = None,
+            _ => {}
         }
 
         let session = self.history.session(history::now_secs());
@@ -899,6 +980,9 @@ impl Overlay {
         InfoPanel {
             tribes: self.lobby_tribes().tribes,
             slots: Tribe::PER_LOBBY,
+            counters,
+            show_counters: self.cfg.show_counters,
+            show_session: self.cfg.show_session,
             start_mmr,
             current_mmr,
             games,
@@ -907,10 +991,26 @@ impl Overlay {
         }
     }
 
+    pub fn counter_preview(&mut self, card_id: &str) -> Option<CardPreview> {
+        if self.cfg.compact_mode == CompactMode::Text {
+            return None;
+        }
+        self.images.prefetch(ImageKind::Render, card_id);
+        Some(CardPreview {
+            card_id: card_id.to_string(),
+            images_rev: self.images.revision(),
+            compact: self.cfg.compact_mode,
+        })
+    }
+
     /// The final-board popup of the hovered "Latest Games" row; old records
     /// from before boards were stored show a note instead.
-    pub fn final_board_popup(&mut self, row: Option<usize>) -> Option<FinalBoardPopup> {
-        let g = self.history.latest(5).into_iter().nth(row?)?;
+    pub fn final_board_popup(&mut self, row: Option<InfoHit>) -> Option<FinalBoardPopup> {
+        let idx = match row? {
+            InfoHit::Game(i) => i,
+            _ => return None,
+        };
+        let g = self.history.latest(5).into_iter().nth(idx)?;
         let board = g.board.as_ref().map(|stored| BoardView {
             turn: stored.turn,
             tier: stored.tier,
@@ -1182,6 +1282,11 @@ impl App {
         // Text mode draws no list art, so there is nothing to warm up.
         if ov.cfg.show_search && ov.cfg.compact_mode != CompactMode::Text {
             ov.images.warm_cache(ImageKind::Tile, ov.db.searchable());
+        }
+        if ov.cfg.show_counters && ov.cfg.compact_mode != CompactMode::Text {
+            let counter_ids = ["BG20_GEM", "BGS_116", "BG28_168", "BG28_800", "BG31_924", "BG25_011", "BG28_603t", "BG_EX1_575"];
+            ov.images.warm_cache(ImageKind::Tile, counter_ids);
+            ov.images.warm_cache(ImageKind::Render, counter_ids);
         }
         log::info!("compositor {}", if x.compositing { "detected: translucent panels" } else { "not detected: opaque panels" });
         x.watch_root()?;
@@ -1806,6 +1911,15 @@ impl App {
             .or_else(|| {
                 let pv = search.as_ref().and_then(|p| self.ov.search_preview(p))?;
                 Some((pv, self.ov.ui.search_row_hover().unwrap_or(0)))
+            })
+            .or_else(|| {
+                if let Some(InfoHit::Counter(i)) = info.hover {
+                    let item = info.counters.get(i)?;
+                    let pv = self.ov.counter_preview(&item.card_id)?;
+                    Some((pv, i))
+                } else {
+                    None
+                }
             });
         // Hover previews then only need a decode, not a download. Text mode
         // shows no previews at all, so it downloads no renders either.
@@ -1836,13 +1950,17 @@ impl App {
         let x = &self.x;
         let p = &mut self.panels;
 
-        if in_game && cfg.show_session {
+        let show_info = in_game && (cfg.show_session || (cfg.show_counters && !info.counters.is_empty()));
+        if show_info {
             let info_rect = layout.info(info.size(s));
             p.info.update(x, info_rect, &info, &mut ctx, |m, c, ctx| m.render(c, ctx));
             // The final board of the hovered game, level with its row.
             match &board_popup {
                 Some(bp) => {
-                    let row = info.row_center(info.hover.unwrap_or(0), s);
+                    let row = match info.hover {
+                        Some(InfoHit::Game(i)) => info.game_row_center(i, s),
+                        _ => None,
+                    };
                     if let Some(cy) = row {
                         let brect = layout.info_popup(bp.size(s), info_rect, cy);
                         p.board.update(x, brect, bp, &mut ctx, |m, c, ctx| m.render(c, ctx));
@@ -1911,7 +2029,23 @@ impl App {
             }
             _ => p.settings.hide(x),
         }
+        let is_counter_preview = matches!(info.hover, Some(InfoHit::Counter(_)));
         let preview_rect = match (&preview, hovered_at) {
+            (Some((pv, _)), _) if is_counter_preview => {
+                let i = match info.hover {
+                    Some(InfoHit::Counter(idx)) => idx,
+                    _ => 0,
+                };
+                let center = info.counter_row_center(i, s).unwrap_or(0.0);
+                let info_rect = layout.info(info.size(s));
+                pv.size(s, ctx.images).map(|(w, h)| {
+                    let cy = info_rect.y as f32 + center;
+                    let y = (cy - h as f32 / 2.0).round() as i32;
+                    let y = y.clamp(layout.hs.y, (layout.hs.y + layout.hs.h - h).max(layout.hs.y));
+                    let x = (info_rect.x + info_rect.w + (8.0 * s) as i32).clamp(layout.hs.x, (layout.hs.x + layout.hs.w - w).max(layout.hs.x));
+                    Rect::new(x, y, w, h)
+                })
+            }
             (Some((pv, _)), Some((pr, center))) => pv.size(s, ctx.images).map(|(w, h)| {
                 let cy = pr.y + center as i32;
                 let y = (cy - h / 2).clamp(layout.hs.y, (layout.hs.y + layout.hs.h - h).max(layout.hs.y));
@@ -2043,6 +2177,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
         }),
         running: false,
         error: None,
+        ..SimView::default()
     };
     ov.ui.selected_tier = Some(ov.game.tavern_tier().max(1));
     ov.ui.list_hover = Some(TierHit::Row(1));
@@ -2068,7 +2203,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     // The final board of the latest game, hovered over in the session panel
     // (only when the replay went all the way to a finished game).
     if !ov.history.latest(5).is_empty() {
-        ov.ui.info_hover = Some(0);
+        ov.ui.info_hover = Some(InfoHit::Game(0));
     }
     // Text mode draws no card art, so there is nothing to download.
     let art = ov.cfg.compact_mode != CompactMode::Text;
@@ -2226,7 +2361,7 @@ pub fn render_offline(mut ov: Overlay, log: &Path, out: &Path, combat: usize) ->
     emit(&mut scratch, &mut ctx, out, "settings", Rect::new(0, 0, w, h), &|c, ctx| settings.render(c, ctx))?;
     let sc = &mut screen;
     emit(sc, &mut ctx, out, "info", layout.info(info.size(s)), &|c, ctx| info.render(c, ctx))?;
-    if let (Some(bp), Some(cy)) = (&board_popup, info.row_center(0, s)) {
+    if let (Some(bp), Some(cy)) = (&board_popup, info.game_row_center(0, s)) {
         let brect = layout.info_popup(bp.size(s), layout.info(info.size(s)), cy);
         emit(sc, &mut ctx, out, "final-board", brect, &|c, ctx| bp.render(c, ctx))?;
     }
@@ -2370,8 +2505,8 @@ mod tests {
         assert_eq!(panel.games[0].hero_card_id, "H1");
         assert_eq!(panel.games[0].hero_name, "Yogg-Saron, Hope's End");
         // Old records hover to a note instead of a board.
-        assert!(ov.final_board_popup(Some(0)).unwrap().board.is_none());
-        assert!(ov.final_board_popup(Some(1)).is_none(), "no row behind the one game");
+        assert!(ov.final_board_popup(Some(InfoHit::Game(0))).unwrap().board.is_none());
+        assert!(ov.final_board_popup(Some(InfoHit::Game(1))).is_none(), "no row behind the one game");
     }
 
     #[test]
@@ -2420,7 +2555,7 @@ mod tests {
         assert_eq!(m.name, "Bat");
 
         // The hovered row shows the board again.
-        let popup = ov.final_board_popup(Some(0)).unwrap();
+        let popup = ov.final_board_popup(Some(InfoHit::Game(0))).unwrap();
         let b = popup.board.unwrap();
         assert_eq!((b.turn, b.minions.len()), (1, 1));
         assert_eq!(b.minions[0].name, "Bat");
@@ -2664,18 +2799,61 @@ mod tests {
         assert_eq!(ov.info_panel(200.0).hover, None);
 
         // Hovering previews row 0
-        ov.ui.info_hover = Some(0);
-        assert_eq!(ov.info_panel(200.0).hover, Some(0));
+        ov.ui.info_hover = Some(InfoHit::Game(0));
+        assert_eq!(ov.info_panel(200.0).hover, Some(InfoHit::Game(0)));
 
         // Pinning keeps row 0 even when unhovered
-        ov.ui.info_pinned = Some(0);
+        ov.ui.info_pinned = Some(InfoHit::Game(0));
         ov.ui.info_hover = None;
-        assert_eq!(ov.info_panel(200.0).hover, Some(0));
+        assert_eq!(ov.info_panel(200.0).hover, Some(InfoHit::Game(0)));
 
         // Resetting on game start clears both
         ov.handle_events(vec![GameEvent::GameStarted], false);
         assert_eq!(ov.ui.info_hover, None);
         assert_eq!(ov.ui.info_pinned, None);
         assert_eq!(ov.info_panel(200.0).hover, None);
+    }
+
+    #[test]
+    fn sim_panel_hides_lethal_when_health_exceeds_damage_cap() {
+        let mut ov = overlay();
+        ov.sim_view = SimView {
+            turn: 4,
+            damage_cap: Some(10),
+            player_hp: 25,
+            opponent_hp: 15,
+            odds: Some(Odds {
+                won: 70.0,
+                tied: 10.0,
+                lost: 20.0,
+                won_lethal: 15.0,
+                lost_lethal: 5.0,
+                average_damage_won: 8.0,
+                average_damage_lost: 4.0,
+                simulations: 8000,
+            }),
+            running: false,
+            error: None,
+        };
+
+        let sim = ov.sim_panel();
+        assert_eq!(sim.damage_cap, Some(10));
+        assert!(sim.title.contains("Cap 10"));
+        let odds = sim.odds.unwrap();
+        // Since opponent_hp (15) > damage_cap (10), won_lethal must NOT be shown
+        assert_eq!(odds.won_lethal, None);
+        // Since player_hp (25) > damage_cap (10), lost_lethal must also NOT be shown
+        assert_eq!(odds.lost_lethal, None);
+
+        // When opponent_hp <= damage_cap (e.g. 8 <= 10):
+        ov.sim_view.opponent_hp = 8;
+        let sim = ov.sim_panel();
+        assert_eq!(sim.odds.unwrap().won_lethal, Some(15.0));
+
+        // When damage_cap is None (uncapped):
+        ov.sim_view.damage_cap = None;
+        ov.sim_view.opponent_hp = 30;
+        let sim = ov.sim_panel();
+        assert_eq!(sim.odds.unwrap().won_lethal, Some(15.0));
     }
 }

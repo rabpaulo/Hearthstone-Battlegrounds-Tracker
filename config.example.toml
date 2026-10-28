@@ -34,6 +34,7 @@ hide_when_unfocused = true
 show_simulation = true
 show_tiers = true
 show_session = true
+show_counters = true
 show_opponent_boards = true
 # "Comps" button: HSReplay's meta comp tier list and guides.
 show_comps = true

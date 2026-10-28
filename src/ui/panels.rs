@@ -8,6 +8,7 @@ use super::draw::{Align, Canvas, Fonts, Rgba, Weight};
 use super::theme::{Theme, ThemeName};
 use crate::cards::{Category, Tribe, KEYWORDS};
 use crate::config::{CompactMode, LayoutSize};
+use crate::game::CounterItem;
 use crate::images::{ImageKind, Images};
 
 pub fn tribe_color(t: Tribe) -> Rgba {
@@ -146,6 +147,7 @@ pub enum TopHit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopBar {
     pub turn: i32,
+    pub damage_cap: Option<i32>,
     pub tavern_tier: i32,
     pub max_tier: i32,
     pub selected: Option<i32>,
@@ -242,8 +244,17 @@ impl TopBar {
         let s = ctx.s;
         let t = ctx.theme;
         ctx.panel(c);
-        let label = if self.turn > 0 { format!("Turn {}", self.turn) } else { "Hero pick".to_string() };
-        ctx.label(c, &label, (Self::PAD + Self::TURN_W / 2.0) * s, Self::H / 2.0 * s, 15.0, Weight::Bold, t.text, Align::Center);
+        let cx = (Self::PAD + Self::TURN_W / 2.0) * s;
+        if self.turn > 0 {
+            ctx.label(c, &format!("Turn {}", self.turn), cx, 14.0 * s, 12.5, Weight::Bold, t.text, Align::Center);
+            if let Some(cap) = self.damage_cap {
+                ctx.label(c, &format!("Cap: {cap}"), cx, 26.5 * s, 10.5, Weight::Bold, t.gold, Align::Center);
+            } else {
+                ctx.label(c, "No cap", cx, 26.5 * s, 10.0, Weight::Medium, t.dim, Align::Center);
+            }
+        } else {
+            ctx.label(c, "Hero pick", cx, Self::H / 2.0 * s, 15.0, Weight::Bold, t.text, Align::Center);
+        }
         let sep = |c: &mut Canvas, x: f32| c.rect(x * s, 7.0 * s, 1.0, (Self::H - 14.0) * s, t.border);
         sep(c, Self::PAD + Self::TURN_W + Self::GAP);
         let by = (Self::H - Self::BTN) / 2.0 * s;
@@ -1388,17 +1399,18 @@ impl SearchPanel {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OddsView {
-    pub won_lethal: f32,
+    pub won_lethal: Option<f32>,
     pub won: f32,
     pub tied: f32,
     pub lost: f32,
-    pub lost_lethal: f32,
+    pub lost_lethal: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimPanel {
     pub title: String,
     pub odds: Option<OddsView>,
+    pub damage_cap: Option<i32>,
     /// Not the combat on screen (shop phase): faded.
     pub dim: bool,
     pub running: bool,
@@ -1436,11 +1448,11 @@ impl SimPanel {
         let col_w = Self::W * s / 5.0;
         let fade = |c: Rgba, dim: bool| if dim { c.alpha(150) } else { c };
         let cols: [(&str, Option<f32>, Rgba); 5] = [
-            ("LETHAL", self.odds.map(|o| o.won_lethal), t.win_lethal),
+            ("LETHAL", self.odds.and_then(|o| o.won_lethal), t.win_lethal),
             ("WIN", self.odds.map(|o| o.won), t.win),
             ("TIE", self.odds.map(|o| o.tied), t.tie),
             ("LOSS", self.odds.map(|o| o.lost), t.loss),
-            ("LETHAL", self.odds.map(|o| o.lost_lethal), t.loss_lethal),
+            ("LETHAL", self.odds.and_then(|o| o.lost_lethal), t.loss_lethal),
         ];
         for (i, (label, value, color)) in cols.iter().enumerate() {
             let cx = col_w * (i as f32 + 0.5);
@@ -1487,15 +1499,24 @@ pub struct GameRow {
     pub mmr_delta: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoHit {
+    Counter(usize),
+    Game(usize),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InfoPanel {
     pub tribes: Vec<Tribe>,
     pub slots: usize,
+    pub counters: Vec<CounterItem>,
+    pub show_counters: bool,
+    pub show_session: bool,
     pub start_mmr: Option<i32>,
     pub current_mmr: Option<i32>,
     pub games: Vec<GameRow>,
-    /// "Latest Games" row under the pointer.
-    pub hover: Option<usize>,
+    /// Row under the pointer.
+    pub hover: Option<InfoHit>,
     /// Unscaled width chosen by the layout.
     pub width: f32,
 }
@@ -1542,41 +1563,117 @@ pub fn format_thousands(n: i32) -> String {
 impl InfoPanel {
     pub const HEAD_H: f32 = 18.0;
     pub const MINIONS_BODY_H: f32 = 56.0;
+    pub const COUNTER_ROW_H: f32 = 24.0;
     pub const MMR_BODY_H: f32 = 40.0;
     pub const GAMES_COLS_H: f32 = 16.0;
     pub const GAME_ROW_H: f32 = 24.0;
 
+    pub fn has_counters(&self) -> bool {
+        self.show_counters && !self.counters.is_empty()
+    }
+
+    fn counters_h(&self) -> f32 {
+        if self.has_counters() {
+            Self::HEAD_H + self.counters.len() as f32 * Self::COUNTER_ROW_H
+        } else {
+            0.0
+        }
+    }
+
+    fn minions_h(&self) -> f32 {
+        if self.show_session {
+            Self::HEAD_H + Self::MINIONS_BODY_H
+        } else {
+            0.0
+        }
+    }
+
+    fn mmr_h(&self) -> f32 {
+        if self.show_session {
+            Self::HEAD_H + Self::MMR_BODY_H
+        } else {
+            0.0
+        }
+    }
+
+    fn games_h(&self) -> f32 {
+        if self.show_session {
+            let games_count = self.games.len().max(1) as f32;
+            Self::HEAD_H + Self::GAMES_COLS_H + games_count * Self::GAME_ROW_H
+        } else {
+            0.0
+        }
+    }
+
     fn height(&self) -> f32 {
-        let games_count = self.games.len().max(1) as f32;
-        Self::HEAD_H + Self::MINIONS_BODY_H
-            + Self::HEAD_H + Self::MMR_BODY_H
-            + Self::HEAD_H + Self::GAMES_COLS_H + games_count * Self::GAME_ROW_H
+        self.minions_h() + self.counters_h() + self.mmr_h() + self.games_h()
+    }
+
+    fn counters_rows_top(&self) -> f32 {
+        self.minions_h() + Self::HEAD_H
     }
 
     /// Unscaled top of the "Latest Games" rows.
-    fn games_top() -> f32 {
-        Self::HEAD_H + Self::MINIONS_BODY_H
-            + Self::HEAD_H + Self::MMR_BODY_H
-            + Self::HEAD_H + Self::GAMES_COLS_H
+    fn games_top(&self) -> f32 {
+        self.minions_h() + self.counters_h() + self.mmr_h() + Self::HEAD_H + Self::GAMES_COLS_H
     }
 
     pub fn size(&self, s: f32) -> (i32, i32) {
         (s_ceil(self.width, s), s_ceil(self.height(), s))
     }
 
-    /// "Latest Games" row under a window-local point.
-    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<usize> {
+    /// Element under a window-local point.
+    pub fn hit(&self, x: f32, y: f32, s: f32) -> Option<InfoHit> {
         let (ux, uy) = (x / s, y / s);
-        if ux < 0.0 || ux >= self.width || uy < Self::games_top() {
+        if ux < 0.0 || ux >= self.width {
             return None;
         }
-        let i = ((uy - Self::games_top()) / Self::GAME_ROW_H).floor() as usize;
-        (i < self.games.len()).then_some(i)
+        if self.has_counters() {
+            let c_top = self.counters_rows_top();
+            let c_bottom = c_top + self.counters.len() as f32 * Self::COUNTER_ROW_H;
+            if uy >= c_top && uy < c_bottom {
+                let i = ((uy - c_top) / Self::COUNTER_ROW_H).floor() as usize;
+                if i < self.counters.len() {
+                    return Some(InfoHit::Counter(i));
+                }
+            }
+        }
+        if self.show_session {
+            let g_top = self.games_top();
+            let g_bottom = g_top + self.games.len().max(1) as f32 * Self::GAME_ROW_H;
+            if uy >= g_top && uy < g_bottom {
+                let i = ((uy - g_top) / Self::GAME_ROW_H).floor() as usize;
+                if i < self.games.len() {
+                    return Some(InfoHit::Game(i));
+                }
+            }
+        }
+        None
     }
 
     /// Window-local vertical centre of a game row.
-    pub fn row_center(&self, i: usize, s: f32) -> Option<f32> {
-        (i < self.games.len()).then(|| (Self::games_top() + (i as f32 + 0.5) * Self::GAME_ROW_H) * s)
+    pub fn game_row_center(&self, i: usize, s: f32) -> Option<f32> {
+        if !self.show_session || i >= self.games.len() {
+            return None;
+        }
+        Some((self.games_top() + (i as f32 + 0.5) * Self::GAME_ROW_H) * s)
+    }
+
+    /// Window-local vertical centre of a counter row.
+    pub fn counter_row_center(&self, i: usize, s: f32) -> Option<f32> {
+        if !self.has_counters() || i >= self.counters.len() {
+            return None;
+        }
+        Some((self.counters_rows_top() + (i as f32 + 0.5) * Self::COUNTER_ROW_H) * s)
+    }
+
+    /// Window-local vertical centre of an element.
+    #[allow(dead_code)]
+    pub fn row_center(&self, hit: InfoHit, s: f32) -> Option<f32> {
+        match hit {
+            InfoHit::Counter(i) => self.counter_row_center(i, s),
+            InfoHit::Game(i) => self.game_row_center(i, s),
+        }
     }
 
     pub fn render(&self, c: &mut Canvas, ctx: &mut Ctx) {
@@ -1595,123 +1692,180 @@ impl InfoPanel {
         };
 
         // 1. Available Minions
-        render_header(c, ctx, "Available Minions", y);
-        y += Self::HEAD_H * s;
+        if self.show_session {
+            render_header(c, ctx, "Available Minions", y);
+            y += Self::HEAD_H * s;
 
-        let tribe_slots = self.slots.max(5);
-        let col_w = w / tribe_slots as f32;
-        let circle_r = 13.5 * s;
-        let circle_cy = y + 17.5 * s;
+            let tribe_slots = self.slots.max(5);
+            let col_w = w / tribe_slots as f32;
+            let circle_r = 13.5 * s;
+            let circle_cy = y + 17.5 * s;
 
-        for i in 0..tribe_slots {
-            let cx = (i as f32 + 0.5) * col_w;
-            match self.tribes.get(i) {
-                Some(&tribe) => {
-                    c.circle(cx, circle_cy, circle_r, Rgba(18, 22, 26, 255));
-                    if let Some(icon) = ctx.images.tribe_icon(tribe) {
-                        c.image_cover(&icon, cx - circle_r, circle_cy - circle_r, circle_r * 2.0, circle_r * 2.0, circle_r, 1.0);
+            for i in 0..tribe_slots {
+                let cx = (i as f32 + 0.5) * col_w;
+                match self.tribes.get(i) {
+                    Some(&tribe) => {
+                        c.circle(cx, circle_cy, circle_r, Rgba(18, 22, 26, 255));
+                        if let Some(icon) = ctx.images.tribe_icon(tribe) {
+                            c.image_cover(&icon, cx - circle_r, circle_cy - circle_r, circle_r * 2.0, circle_r * 2.0, circle_r, 1.0);
+                        }
+                        c.stroke_circle(cx, circle_cy, circle_r, 1.5 * s, Rgba(46, 139, 87, 255));
+                        let label = tribe.label();
+                        let fit_label = ctx.fonts.fit(label, 9.5 * s, Weight::Bold, col_w - 2.0 * s);
+                        ctx.label_shadow_align(c, &fit_label, cx, circle_cy + circle_r + 8.5 * s, 9.5, Weight::Bold, t.text, Align::Center);
                     }
-                    c.stroke_circle(cx, circle_cy, circle_r, 1.5 * s, Rgba(46, 139, 87, 255));
-                    let label = tribe.label();
-                    let fit_label = ctx.fonts.fit(label, 9.5 * s, Weight::Bold, col_w - 2.0 * s);
-                    ctx.label_shadow_align(c, &fit_label, cx, circle_cy + circle_r + 8.5 * s, 9.5, Weight::Bold, t.text, Align::Center);
-                }
-                None => {
-                    c.circle(cx, circle_cy, circle_r, t.button);
-                    c.stroke_circle(cx, circle_cy, circle_r, 1.0 * s, t.border);
-                    ctx.label(c, "?", cx, circle_cy, 12.0, Weight::Bold, t.dim, Align::Center);
+                    None => {
+                        c.circle(cx, circle_cy, circle_r, t.button);
+                        c.stroke_circle(cx, circle_cy, circle_r, 1.0 * s, t.border);
+                        ctx.label(c, "?", cx, circle_cy, 12.0, Weight::Bold, t.dim, Align::Center);
+                    }
                 }
             }
+            y += Self::MINIONS_BODY_H * s;
         }
-        y += Self::MINIONS_BODY_H * s;
 
-        // 2. MMR
-        render_header(c, ctx, "MMR", y);
-        y += Self::HEAD_H * s;
+        // 2. Spells & Counters
+        if self.has_counters() {
+            render_header(c, ctx, "Spells & Counters", y);
+            y += Self::HEAD_H * s;
 
-        // Vertical divider between Start and Current
-        c.rect(w * 0.5, y + 4.0 * s, 1.0 * s, (Self::MMR_BODY_H - 8.0) * s, t.border);
-
-        let sub_y = y + 10.0 * s;
-        let val_y = y + 26.5 * s;
-        let col1_x = w * 0.25;
-        let col2_x = w * 0.75;
-
-        ctx.label(c, "Start", col1_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
-        ctx.label(c, "Current", col2_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
-
-        let start_str = self.start_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
-        let current_str = self.current_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
-
-        ctx.label_shadow_align(c, &start_str, col1_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
-        ctx.label_shadow_align(c, &current_str, col2_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
-
-        y += Self::MMR_BODY_H * s;
-
-        // 3. Latest Games
-        render_header(c, ctx, "Latest Games", y);
-        y += Self::HEAD_H * s;
-
-        let ch_y = y + Self::GAMES_COLS_H * s / 2.0;
-        ctx.label(c, "Hero", 8.0 * s, ch_y, 10.5, Weight::Medium, t.dim, Align::Left);
-        let place_x = w * 0.62;
-        let mmr_x = w * 0.86;
-        ctx.label(c, "Place", place_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
-        ctx.label(c, "MMR", mmr_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
-
-        c.rect(0.0, y + Self::GAMES_COLS_H * s - 1.0 * s, w, 1.0 * s, t.border.alpha(120));
-        y += Self::GAMES_COLS_H * s;
-
-        if self.games.is_empty() {
-            let row_h = Self::GAME_ROW_H * s;
-            ctx.label(c, "No games yet", 8.0 * s, y + row_h / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
-        } else {
-            for (i, game) in self.games.iter().enumerate() {
-                let row_h = Self::GAME_ROW_H * s;
+            for (i, counter) in self.counters.iter().enumerate() {
+                let row_h = Self::COUNTER_ROW_H * s;
                 let mid_y = y + row_h / 2.0;
 
-                // Hero tile art on left with fade
+                // Card tile art on left with fade
                 if ctx.compact != CompactMode::Text {
-                    if let Some(img) = ctx.images.get(ImageKind::Tile, &game.hero_card_id) {
+                    if let Some(img) = ctx.images.get(ImageKind::Tile, &counter.card_id) {
                         let cap = match ctx.compact {
                             CompactMode::Small => 0.25,
-                            _ => 0.46,
+                            _ => 0.40,
                         };
                         let tw = (row_h * img.width() as f32 / img.height() as f32).min(w * cap);
                         c.image_cover(&img, 0.0, y, tw, row_h, 0.0, 1.0);
-                        c.hgradient(tw * 0.35, y, tw * 0.65, row_h, t.bg.alpha(0), t.bg);
+                        c.hgradient(tw * 0.30, y, tw * 0.70, row_h, t.bg.alpha(0), t.bg);
                     }
                 }
 
-                // Hover: pointing here previews the game's final board.
-                if self.hover == Some(i) {
+                // Hover highlight
+                if self.hover == Some(InfoHit::Counter(i)) {
                     c.rect(0.0, y, w, row_h, t.tint);
                     c.rect(0.0, y, 3.0 * s, row_h, t.gold);
                 }
 
-                // Hero name
-                let name = ctx.fonts.fit(&game.hero_name, 11.0 * s, Weight::Bold, place_x - 8.0 * s - 14.0 * s);
-                ctx.label_shadow_align(c, &name, 8.0 * s, mid_y, 11.0, Weight::Bold, t.text, Align::Left);
+                // Value measurement so label does not overlap
+                let val_px = 11.5 * s;
+                let val_w = ctx.fonts.measure(&counter.value, val_px, Weight::Bold);
+                let max_label_w = (w - val_w - 24.0 * s).max(40.0 * s);
 
-                // Placement (ordinal: 1st, 2nd, etc.)
-                let ord = ordinal(game.place);
-                let p_color = place_color(game.place, &t);
-                ctx.label_shadow_align(c, &ord, place_x, mid_y, 11.5, Weight::Bold, p_color, Align::Center);
+                // Label
+                let fit_label = ctx.fonts.fit(&counter.label, 11.0 * s, Weight::Bold, max_label_w);
+                ctx.label_shadow_align(c, &fit_label, 8.0 * s, mid_y, 11.0, Weight::Bold, t.text, Align::Left);
 
-                // MMR Delta (+35, -44, or -)
-                let (delta_str, delta_color) = match game.mmr_delta {
-                    Some(d) => match d.cmp(&0) {
-                        std::cmp::Ordering::Greater => (format!("+{d}"), t.win),
-                        std::cmp::Ordering::Less => (d.to_string(), t.loss),
-                        std::cmp::Ordering::Equal => ("0".to_string(), t.dim),
-                    },
-                    None => ("-".to_string(), t.dim),
+                // Value
+                let val_color = match counter.id.as_str() {
+                    "blood_gem" => Rgba::hex(0xff6b81),
+                    "free_refresh" => t.gold,
+                    "tavern_spells" => Rgba::hex(0x54a0ff),
+                    "extra_gold" => t.gold,
+                    _ => t.text,
                 };
-                ctx.label_shadow_align(c, &delta_str, mmr_x, mid_y, 11.5, Weight::Bold, delta_color, Align::Center);
+                ctx.label_shadow_align(c, &counter.value, w - 8.0 * s, mid_y, 11.5, Weight::Bold, val_color, Align::Right);
 
                 // Divider line below row
                 c.rect(0.0, y + row_h - 1.0 * s, w, 1.0 * s, t.border.alpha(70));
                 y += row_h;
+            }
+        }
+
+        if self.show_session {
+            // 3. MMR
+            render_header(c, ctx, "MMR", y);
+            y += Self::HEAD_H * s;
+
+            // Vertical divider between Start and Current
+            c.rect(w * 0.5, y + 4.0 * s, 1.0 * s, (Self::MMR_BODY_H - 8.0) * s, t.border);
+
+            let sub_y = y + 10.0 * s;
+            let val_y = y + 26.5 * s;
+            let col1_x = w * 0.25;
+            let col2_x = w * 0.75;
+
+            ctx.label(c, "Start", col1_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
+            ctx.label(c, "Current", col2_x, sub_y, 10.5, Weight::Medium, t.dim, Align::Center);
+
+            let start_str = self.start_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
+            let current_str = self.current_mmr.map(format_thousands).unwrap_or_else(|| "-".to_string());
+
+            ctx.label_shadow_align(c, &start_str, col1_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
+            ctx.label_shadow_align(c, &current_str, col2_x, val_y, 14.5, Weight::Bold, t.text, Align::Center);
+
+            y += Self::MMR_BODY_H * s;
+
+            // 4. Latest Games
+            render_header(c, ctx, "Latest Games", y);
+            y += Self::HEAD_H * s;
+
+            let ch_y = y + Self::GAMES_COLS_H * s / 2.0;
+            ctx.label(c, "Hero", 8.0 * s, ch_y, 10.5, Weight::Medium, t.dim, Align::Left);
+            let place_x = w * 0.62;
+            let mmr_x = w * 0.86;
+            ctx.label(c, "Place", place_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
+            ctx.label(c, "MMR", mmr_x, ch_y, 10.5, Weight::Medium, t.dim, Align::Center);
+
+            c.rect(0.0, y + Self::GAMES_COLS_H * s - 1.0 * s, w, 1.0 * s, t.border.alpha(120));
+            y += Self::GAMES_COLS_H * s;
+
+            if self.games.is_empty() {
+                let row_h = Self::GAME_ROW_H * s;
+                ctx.label(c, "No games yet", 8.0 * s, y + row_h / 2.0, 11.0, Weight::Medium, t.dim, Align::Left);
+            } else {
+                for (i, game) in self.games.iter().enumerate() {
+                    let row_h = Self::GAME_ROW_H * s;
+                    let mid_y = y + row_h / 2.0;
+
+                    // Hero tile art on left with fade
+                    if ctx.compact != CompactMode::Text {
+                        if let Some(img) = ctx.images.get(ImageKind::Tile, &game.hero_card_id) {
+                            let cap = match ctx.compact {
+                                CompactMode::Small => 0.25,
+                                _ => 0.46,
+                            };
+                            let tw = (row_h * img.width() as f32 / img.height() as f32).min(w * cap);
+                            c.image_cover(&img, 0.0, y, tw, row_h, 0.0, 1.0);
+                            c.hgradient(tw * 0.35, y, tw * 0.65, row_h, t.bg.alpha(0), t.bg);
+                        }
+                    }
+
+                    // Hover: pointing here previews the game's final board.
+                    if self.hover == Some(InfoHit::Game(i)) {
+                        c.rect(0.0, y, w, row_h, t.tint);
+                        c.rect(0.0, y, 3.0 * s, row_h, t.gold);
+                    }
+
+                    // Hero name
+                    let name = ctx.fonts.fit(&game.hero_name, 11.0 * s, Weight::Bold, place_x - 8.0 * s - 14.0 * s);
+                    ctx.label_shadow_align(c, &name, 8.0 * s, mid_y, 11.0, Weight::Bold, t.text, Align::Left);
+
+                    // Placement (ordinal: 1st, 2nd, etc.)
+                    let ord = ordinal(game.place);
+                    let p_color = place_color(game.place, &t);
+                    ctx.label_shadow_align(c, &ord, place_x, mid_y, 11.5, Weight::Bold, p_color, Align::Center);
+
+                    // MMR Delta (+35, -44, or -)
+                    let (delta_str, delta_color) = match game.mmr_delta {
+                        Some(d) => match d.cmp(&0) {
+                            std::cmp::Ordering::Greater => (format!("+{d}"), t.win),
+                            std::cmp::Ordering::Less => (d.to_string(), t.loss),
+                            std::cmp::Ordering::Equal => ("0".to_string(), t.dim),
+                        },
+                        None => ("-".to_string(), t.dim),
+                    };
+                    ctx.label_shadow_align(c, &delta_str, mmr_x, mid_y, 11.5, Weight::Bold, delta_color, Align::Center);
+
+                    // Divider line below row
+                    c.rect(0.0, y + row_h - 1.0 * s, w, 1.0 * s, t.border.alpha(70));
+                    y += row_h;
+                }
             }
         }
     }
@@ -2594,6 +2748,9 @@ mod tests {
         let panel = InfoPanel {
             tribes: vec![Tribe::Beast, Tribe::Mech],
             slots: 5,
+            counters: vec![],
+            show_counters: true,
+            show_session: true,
             start_mmr: Some(13726),
             current_mmr: Some(13717),
             games: vec![
@@ -2616,14 +2773,40 @@ mod tests {
         // Height: 18 + 56 + 18 + 40 + 18 + 16 + 2 * 24 = 214
         assert_eq!(panel.size(1.0), (190, 214));
         // Hover over the rows area highlights the game under the pointer.
-        assert_eq!(panel.hit(80.0, 172.0, 1.0), Some(0));
-        assert_eq!(panel.hit(80.0, 210.0, 1.0), Some(1));
+        assert_eq!(panel.hit(80.0, 172.0, 1.0), Some(InfoHit::Game(0)));
+        assert_eq!(panel.hit(80.0, 210.0, 1.0), Some(InfoHit::Game(1)));
         assert_eq!(panel.hit(80.0, 214.0, 1.0), None, "below the second row");
         assert_eq!(panel.hit(80.0, 100.0, 1.0), None, "MMR section does not hover");
-        assert_eq!(panel.row_center(1, 2.0), Some((166.0 + 1.5 * 24.0) * 2.0));
+        assert_eq!(panel.game_row_center(1, 2.0), Some((166.0 + 1.5 * 24.0) * 2.0));
         let mut hovered = panel.clone();
-        hovered.hover = Some(1);
+        hovered.hover = Some(InfoHit::Game(1));
         assert_ne!(hovered, panel, "the hover is part of the model");
+
+        // With active counters (e.g. Blood Gem +1/+1 and Free Rolls 25)
+        let mut panel_with_counters = panel.clone();
+        panel_with_counters.counters = vec![
+            CounterItem {
+                id: "blood_gem".into(),
+                card_id: "BG20_GEM".into(),
+                label: "Blood Gem".into(),
+                value: "+1 / +1".into(),
+                sort_order: 1,
+            },
+            CounterItem {
+                id: "free_refresh".into(),
+                card_id: "BGS_116".into(),
+                label: "Free Rolls".into(),
+                value: "25".into(),
+                sort_order: 2,
+            },
+        ];
+        // Height: 214 + (18 + 2 * 24) = 214 + 66 = 280
+        assert_eq!(panel_with_counters.size(1.0), (190, 280));
+        // Counters are positioned between Minions (18+56=74) and MMR.
+        // Counters header: 74..92. Row 0: 92..116. Row 1: 116..140.
+        assert_eq!(panel_with_counters.hit(80.0, 100.0, 1.0), Some(InfoHit::Counter(0)));
+        assert_eq!(panel_with_counters.hit(80.0, 125.0, 1.0), Some(InfoHit::Counter(1)));
+        assert_eq!(panel_with_counters.counter_row_center(0, 1.0), Some(92.0 + 12.0));
 
         let (w, h) = panel.size(1.0);
         let mut canvas = Canvas::new(w, h);
@@ -2720,6 +2903,7 @@ mod tests {
     fn top_bar_tools_and_settings_hit() {
         let bar = TopBar {
             turn: 3,
+            damage_cap: Some(5),
             tavern_tier: 2,
             max_tier: 6,
             selected: None,
@@ -2740,5 +2924,53 @@ mod tests {
         assert_eq!(bar.hit(settings_x + 5.0, 1.0), Some(TopHit::Settings));
         let tier1_x = bar.button_x(1);
         assert_eq!(bar.hit(tier1_x + 5.0, 1.0), Some(TopHit::Tier(1)));
+    }
+
+    #[test]
+    fn sim_panel_and_top_bar_render_damage_cap() {
+        let bar = TopBar {
+            turn: 4,
+            damage_cap: Some(10),
+            tavern_tier: 3,
+            max_tier: 6,
+            selected: None,
+            hover: None,
+            comps: false,
+            comps_open: false,
+            search: false,
+            search_open: false,
+            settings_open: false,
+        };
+        let (w, h) = bar.size(1.0);
+        let mut canvas = Canvas::new(w, h);
+        let mut fonts = Fonts::load();
+        let mut images = Images::new();
+        let mut ctx = Ctx {
+            fonts: &mut fonts,
+            images: &mut images,
+            theme: Theme::DARK,
+            compact: CompactMode::Full,
+            s: 1.0,
+            opaque: false,
+        };
+        bar.render(&mut canvas, &mut ctx);
+
+        let sim = SimPanel {
+            title: "Current Combat · Cap 10".into(),
+            odds: Some(OddsView {
+                won_lethal: None, // Lethal hidden due to damage cap
+                won: 75.0,
+                tied: 5.0,
+                lost: 20.0,
+                lost_lethal: None,
+            }),
+            damage_cap: Some(10),
+            dim: false,
+            running: false,
+            note: None,
+        };
+        let (w, h) = sim.size(1.0);
+        let mut canvas = Canvas::new(w, h);
+        sim.render(&mut canvas, &mut ctx);
     }
 }

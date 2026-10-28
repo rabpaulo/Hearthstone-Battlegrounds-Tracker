@@ -22,6 +22,8 @@ import { createInterface } from 'node:readline';
 
 const require = createRequire(import.meta.url);
 const sim = require('@firestone-hs/simulate-bgs-battle');
+const damageCap = require('@firestone-hs/simulate-bgs-battle/dist/simulation/damage-cap');
+const origGetCombatDamageCap = damageCap.getCombatDamageCap;
 const { AllCardsService, GameTag, Race } = require('@firestone-hs/reference-data');
 
 // The simulator logs to stdout; keep that channel for the protocol.
@@ -206,6 +208,7 @@ function battleInfo(snapshot, sims) {
             intermediateResults: 400,
             includeOutcomeSamples: false,
             skipInfoLogs: true,
+            applyDamageCap: true,
         },
         gameState: {
             currentTurn: snapshot.turn,
@@ -250,21 +253,30 @@ async function simulate(id, snapshot, sims) {
         send({ id, type: 'error', message: `unknown cards: ${missing.join(', ')}` });
         return;
     }
-    const input = battleInfo(snapshot, sims);
-    const cardsData = sim.prepareBattleCardsData(input, cards);
-    const it = sim.simulateBattle(input, cards, cardsData);
-    let step = it.next();
-    while (!step.done) {
-        if (step.value) send({ id, type: 'partial', result: summary(step.value) });
-        await yieldToEvents();
-        if (current !== id) return;
-        step = it.next();
+    if (snapshot.damageCap !== undefined) {
+        damageCap.getCombatDamageCap = () => snapshot.damageCap;
+    } else {
+        damageCap.getCombatDamageCap = origGetCombatDamageCap;
     }
-    if (!step.value) {
-        send({ id, type: 'error', message: 'simulator returned no result' });
-        return;
+    try {
+        const input = battleInfo(snapshot, sims);
+        const cardsData = sim.prepareBattleCardsData(input, cards);
+        const it = sim.simulateBattle(input, cards, cardsData);
+        let step = it.next();
+        while (!step.done) {
+            if (step.value) send({ id, type: 'partial', result: summary(step.value) });
+            await yieldToEvents();
+            if (current !== id) return;
+            step = it.next();
+        }
+        if (!step.value) {
+            send({ id, type: 'error', message: 'simulator returned no result' });
+            return;
+        }
+        send({ id, type: 'result', result: summary(step.value) });
+    } finally {
+        damageCap.getCombatDamageCap = origGetCombatDamageCap;
     }
-    send({ id, type: 'result', result: summary(step.value) });
 }
 
 createInterface({ input: process.stdin }).on('line', (line) => {
